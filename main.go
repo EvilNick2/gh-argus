@@ -34,16 +34,21 @@ func run() error {
 		return nil
 	})
 	flag.Parse()
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
 	if len(repos) == 0 {
-		return errors.New("usage: gh argus -R owner/repo [-R owner/repo ...]")
+		chosen, err := pick(ctx)
+		if err != nil || chosen == nil {
+			return err
+		}
+		repos = chosen
 	}
 
 	client, err := api.DefaultHTTPClient()
 	if err != nil {
 		return err
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer stop()
 
 	w := &watch.Watcher{
 		Fetcher:   fetch.New(client, "https://api.github.com"),

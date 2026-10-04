@@ -1,6 +1,7 @@
 package picker
 
 import (
+	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -300,5 +301,51 @@ func TestViewMarksPrivateRepos(t *testing.T) {
 		if strings.Contains(line, "EvilNick2/dotfiles") && !strings.Contains(line, "private") {
 			t.Errorf("private repo not marked: %q", line)
 		}
+	}
+}
+
+func TestInitRunsGivenCommand(t *testing.T) {
+	ran := false
+	m := New(sample, nil, nil).WithInit(func() tea.Msg { ran = true; return nil })
+
+	if cmd := m.Init(); cmd == nil {
+		t.Fatal("Init returned no command")
+	} else {
+		cmd()
+	}
+	if !ran {
+		t.Error("Init did not return the command given to WithInit")
+	}
+}
+
+func TestReposMsgWithErrorStillAppliesRepos(t *testing.T) {
+	m, _ := newModel(t, sample[:1], nil, 20)
+
+	m = send(m, ReposMsg{Repos: sample, Err: errors.New("saving cache: disk full")})
+	v := m.View().Content
+	if !strings.Contains(v, "homelab-gitops") || !strings.Contains(v, "disk full") {
+		t.Errorf("want new repos and the error shown, got:\n%s", v)
+	}
+}
+
+func TestReposMsgWithOnlyErrorKeepsList(t *testing.T) {
+	m, _ := newModel(t, sample, nil, 20)
+
+	m = send(m, ReposMsg{Err: errors.New("offline")})
+	v := m.View().Content
+	if !strings.Contains(v, "dotfiles") || !strings.Contains(v, "offline") {
+		t.Errorf("want old repos kept and the error shown, got:\n%s", v)
+	}
+}
+
+func TestEmptyListShowsLoadingUntilReposArrive(t *testing.T) {
+	m, _ := newModel(t, nil, nil, 20)
+	if !strings.Contains(m.View().Content, "loading repos") {
+		t.Errorf("empty picker shows no loading hint:\n%s", m.View().Content)
+	}
+
+	m = send(m, ReposMsg{Repos: []repos.Repo{}})
+	if strings.Contains(m.View().Content, "loading repos") {
+		t.Error("still loading after an empty list arrived")
 	}
 }

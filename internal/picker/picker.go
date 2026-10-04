@@ -24,6 +24,7 @@ type StatusMsg struct {
 }
 
 // ReposMsg replaces the repo list, typically after a background refresh.
+// A nil Repos keeps the current list. Err is shown either way.
 type ReposMsg struct {
 	Repos []repos.Repo
 	Err   error
@@ -41,6 +42,7 @@ type Model struct {
 	asked    map[string]bool
 	selected map[string]bool
 	fetch    StatusFunc
+	init     tea.Cmd
 
 	visible   []int
 	cursor    int
@@ -51,6 +53,7 @@ type Model struct {
 
 	width, height int
 	err           error
+	loaded        bool // a ReposMsg has arrived
 	done          bool
 	cancelled     bool
 }
@@ -145,8 +148,15 @@ func (m *Model) enrich() tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
+// WithInit sets a command to run when the program starts, such as a
+// background refresh of the repo list.
+func (m Model) WithInit(cmd tea.Cmd) Model {
+	m.init = cmd
+	return m
+}
+
 func (m Model) Init() tea.Cmd {
-	return nil
+	return m.init
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -160,11 +170,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.err = msg.Err
 	case ReposMsg:
-		if msg.Err != nil {
-			m.err = msg.Err
-		} else {
+		m.loaded = true
+		if msg.Repos != nil {
 			m.setRepos(msg.Repos)
 		}
+		m.err = msg.Err
 	case tea.KeyPressMsg:
 		if cmd := m.key(msg); cmd != nil {
 			return m, cmd
@@ -311,6 +321,9 @@ func (m Model) View() tea.View {
 	info := fmt.Sprintf("owner: %s  %d/%d repos  %d selected", owner, len(m.visible), len(m.repos), len(m.Selected()))
 	if m.filtering || m.filter != "" {
 		info = "/" + m.filter + "  " + info
+	}
+	if len(m.repos) == 0 && !m.loaded {
+		info += "  loading repos"
 	}
 	if m.err != nil {
 		info += "  " + errorStyle.Render(m.err.Error())
