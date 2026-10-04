@@ -15,11 +15,14 @@ import (
 
 	"github.com/EvilNick2/gh-argus/internal/app"
 	"github.com/EvilNick2/gh-argus/internal/fetch"
+	"github.com/EvilNick2/gh-argus/internal/joblog"
 	"github.com/EvilNick2/gh-argus/internal/picker"
 	"github.com/EvilNick2/gh-argus/internal/repos"
 	"github.com/EvilNick2/gh-argus/internal/store"
 	"github.com/EvilNick2/gh-argus/internal/watch"
 )
+
+const apiURL = "https://api.github.com"
 
 func main() {
 	if err := run(); err != nil {
@@ -57,7 +60,7 @@ func run() error {
 	}
 
 	w := &watch.Watcher{
-		Fetcher:   fetch.New(client, "https://api.github.com"),
+		Fetcher:   fetch.New(client, apiURL),
 		Intervals: watch.DefaultIntervals,
 	}
 	deps := app.Deps{
@@ -80,6 +83,13 @@ func run() error {
 				close(ch)
 			}()
 			return ch
+		},
+		FetchLog: func(ctx context.Context, repo string, id int64) ([]joblog.Line, error) {
+			body, err := joblog.Fetch(ctx, client, apiURL, repo, id)
+			if err != nil {
+				return nil, err
+			}
+			return joblog.Parse(body), nil
 		},
 		SaveSelection: func(rs []string) error { return st.Save("selection", rs) },
 		Now:           time.Now,

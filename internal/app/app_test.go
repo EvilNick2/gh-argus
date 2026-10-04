@@ -11,10 +11,12 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/EvilNick2/gh-argus/internal/joblog"
 	"github.com/EvilNick2/gh-argus/internal/picker"
 	"github.com/EvilNick2/gh-argus/internal/repos"
 	"github.com/EvilNick2/gh-argus/internal/runs"
 	"github.com/EvilNick2/gh-argus/internal/runsview"
+	"github.com/EvilNick2/gh-argus/internal/runview"
 	"github.com/EvilNick2/gh-argus/internal/watch"
 )
 
@@ -28,6 +30,9 @@ type fakeWatch struct {
 	runCalls []string
 	runCtxs  []context.Context
 	runChans []chan watch.RunEvent
+
+	logCalls []string
+	logBody  []joblog.Line
 }
 
 func (f *fakeWatch) deps() Deps {
@@ -49,6 +54,10 @@ func (f *fakeWatch) deps() Deps {
 			f.runCtxs = append(f.runCtxs, ctx)
 			f.runChans = append(f.runChans, ch)
 			return ch
+		},
+		FetchLog: func(ctx context.Context, repo string, id int64) ([]joblog.Line, error) {
+			f.logCalls = append(f.logCalls, fmt.Sprintf("%s/%d", repo, id))
+			return f.logBody, nil
 		},
 		Now: func() time.Time { return time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC) },
 	}
@@ -357,5 +366,99 @@ func TestQuitFromRunScreenStopsBothWatches(t *testing.T) {
 	}
 	if f.ctxs[0].Err() == nil || f.runCtxs[0].Err() == nil {
 		t.Error("watches not cancelled on quit")
+	}
+}
+
+var logJob = runs.Job{ID: 70, Name: "compile", Status: "completed", Conclusion: "failure"}
+
+// onLogScreen opens the log of job 70 from the run screen and returns the
+// command that fetches it.
+func onLogScreen(t *testing.T, f *fakeWatch) (Model, tea.Cmd) {
+	t.Helper()
+	m, _ := onRunScreen(t, f)
+	m, fetch := step(m, runview.OpenLogMsg{Repo: "o/r", Job: logJob})
+	if fetch == nil {
+		t.Fatal("opening a log returned no fetch command")
+	}
+	return m, fetch
+}
+
+func TestOpenLogFetchesAndShowsIt(t *testing.T) {
+	f := &fakeWatch{logBody: []joblog.Line{{Text: "hello from the runner"}}}
+	m, fetch := onLogScreen(t, f)
+
+	if v := view(m); !strings.Contains(v, "compile") || !strings.Contains(v, "loading log") {
+		t.Errorf("log screen before fetch:\n%s", v)
+	}
+	m, _ = step(m, fetch())
+	if len(f.logCalls) != 1 || f.logCalls[0] != "o/r/70" {
+		t.Errorf("log fetches %v", f.logCalls)
+	}
+	if v := view(m); !strings.Contains(v, "hello from the runner") {
+		t.Errorf("log not shown:\n%s", v)
+	}
+}
+
+func TestEscFromLogReturnsToRunScreen(t *testing.T) {
+	f := &fakeWatch{}
+	m, fetch := onLogScreen(t, f)
+	m, _ = step(m, fetch())
+
+	m, cmd := step(m, keyMsg("esc"))
+	m, _ = step(m, cmd())
+	if v := view(m); !strings.Contains(v, "o/r #7 build") || strings.Contains(v, "loading log") {
+		t.Errorf("not back on run screen:\n%s", v)
+	}
+	if f.runCtxs[0].Err() != nil {
+		t.Error("job watch cancelled by leaving the log")
+	}
+}
+
+func TestReloadFetchesAgain(t *testing.T) {
+	f := &fakeWatch{}
+	m, fetch := onLogScreen(t, f)
+	m, _ = step(m, fetch())
+
+	m, cmd := step(m, keyMsg("r"))
+	m, refetch := step(m, cmd())
+	if refetch == nil {
+		t.Fatal("reload returned no fetch command")
+	}
+	step(m, refetch())
+	if len(f.logCalls) != 2 {
+		t.Errorf("log fetched %d times, want 2", len(f.logCalls))
+	}
+}
+
+func TestStaleLogResultIgnored(t *testing.T) {
+	f := &fakeWatch{logBody: []joblog.Line{{Text: "stale log"}}}
+	m, staleFetch := onLogScreen(t, f)
+	m, cmd := step(m, keyMsg("esc"))
+	m, _ = step(m, cmd())
+	other := logJob
+	other.ID, other.Name = 71, "other"
+	m, _ = step(m, runview.OpenLogMsg{Repo: "o/r", Job: other})
+
+	m, _ = step(m, staleFetch())
+	if v := view(m); strings.Contains(v, "stale log") {
+		t.Errorf("stale log shown:\n%s", v)
+	}
+}
+
+func TestQWhileSearchingLogIsText(t *testing.T) {
+	f := &fakeWatch{logBody: []joblog.Line{{Text: "a quiet line"}}}
+	m, fetch := onLogScreen(t, f)
+	m, _ = step(m, fetch())
+
+	m, _ = step(m, keyMsg("/"))
+	m, cmd := step(m, keyMsg("q"))
+	if cmd != nil {
+		if _, ok := cmd().(tea.QuitMsg); ok {
+			t.Fatal("q in log search quit the app")
+		}
+	}
+	m, _ = step(m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	if v := view(m); !strings.Contains(v, "/q 1/1") {
+		t.Errorf("search for q not applied:\n%s", v)
 	}
 }

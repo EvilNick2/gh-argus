@@ -50,7 +50,8 @@ func TestLiveFetchAndParse(t *testing.T) {
 	}
 	t.Logf("%d bytes, %d lines, %d groups, %d errors, %d warnings, %d commands",
 		len(body), len(lines), kinds[Group], kinds[Error], kinds[Warning], kinds[Command])
-	if len(lines) == 0 || kinds[Group] == 0 {
-		t.Error("expected lines and at least one group")
+	// Every job's checkout and cleanup emit groups and [command] lines.
+	if len(lines) == 0 || kinds[Group] == 0 || kinds[Command] == 0 {
+		t.Error("expected lines, groups and command lines")
 	}
 }

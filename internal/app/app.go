@@ -11,6 +11,8 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/EvilNick2/gh-argus/internal/joblog"
+	"github.com/EvilNick2/gh-argus/internal/logview"
 	"github.com/EvilNick2/gh-argus/internal/picker"
 	"github.com/EvilNick2/gh-argus/internal/runs"
 	"github.com/EvilNick2/gh-argus/internal/runsview"
@@ -23,7 +25,9 @@ type Deps struct {
 	// Watch starts watching repos until ctx is done and returns the events.
 	Watch func(ctx context.Context, repos []string) <-chan watch.Event
 	// WatchRun polls the jobs of one run until ctx is done.
-	WatchRun      func(ctx context.Context, repo string, id int64) <-chan watch.RunEvent
+	WatchRun func(ctx context.Context, repo string, id int64) <-chan watch.RunEvent
+	// FetchLog downloads and parses the log of a job.
+	FetchLog      func(ctx context.Context, repo string, id int64) ([]joblog.Line, error)
 	SaveSelection func(repos []string) error
 	Now           func() time.Time
 }
@@ -34,6 +38,7 @@ const (
 	screenPicker screen = iota
 	screenTabs
 	screenRun
+	screenLog
 )
 
 var tabs = []struct {
@@ -62,6 +67,14 @@ type runEventMsg struct {
 	ok  bool
 }
 
+// logMsg carries a fetched log, tagged so a slow fetch for a log that has
+// since been closed is dropped.
+type logMsg struct {
+	gen   int
+	lines []joblog.Line
+	err   error
+}
+
 type Model struct {
 	deps   Deps
 	screen screen
@@ -77,6 +90,11 @@ type Model struct {
 	runGen    int
 	runEvents <-chan watch.RunEvent
 	runCancel context.CancelFunc
+
+	log    logview.Model
+	logGen int
+	logJob runs.Job
+	logRep string
 
 	width, height int
 	err           error
@@ -117,6 +135,22 @@ func (m *Model) openRun(repo string, r runs.Run) {
 	m.runEvents = m.deps.WatchRun(ctx, repo, r.ID)
 	m.run = runview.New(repo, r, m.deps.Now).SetSize(m.width, m.runHeight())
 	m.screen = screenRun
+}
+
+func (m *Model) openLog(repo string, job runs.Job) tea.Cmd {
+	m.logRep, m.logJob = repo, job
+	m.log = logview.New(repo, job).SetSize(m.width, m.runHeight())
+	m.screen = screenLog
+	return m.fetchLog()
+}
+
+func (m *Model) fetchLog() tea.Cmd {
+	m.logGen++
+	gen, repo, id, fetch := m.logGen, m.logRep, m.logJob.ID, m.deps.FetchLog
+	return func() tea.Msg {
+		lines, err := fetch(context.Background(), repo, id)
+		return logMsg{gen: gen, lines: lines, err: err}
+	}
 }
 
 func (m *Model) stopRun() {
@@ -175,6 +209,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		m.runs = m.runs.SetSize(m.width, m.bodyHeight())
 		m.run = m.run.SetSize(m.width, m.runHeight())
+		m.log = m.log.SetSize(m.width, m.runHeight())
 		return m.updatePicker(msg)
 
 	case eventMsg:
@@ -182,7 +217,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.runs, _ = m.runs.Update(msg.ev)
-		if m.screen == screenRun {
+		if m.screen == screenRun || m.screen == screenLog {
 			if repo, open := m.run.Run(); repo == msg.ev.Repo {
 				for _, r := range msg.ev.Runs {
 					if r.ID == open.ID {
@@ -215,7 +250,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case runview.OpenLogMsg:
-		// The log view arrives in the next piece.
+		return m, m.openLog(msg.Repo, msg.Job)
+
+	case logMsg:
+		if msg.gen != m.logGen {
+			return m, nil
+		}
+		m.log, _ = m.log.Update(logview.LogMsg{Lines: msg.lines, Err: msg.err})
+		return m, nil
+
+	case logview.ReloadMsg:
+		return m, m.fetchLog()
+
+	case logview.BackMsg:
+		m.screen = screenRun
 		return m, nil
 
 	case tea.KeyPressMsg:
@@ -231,6 +279,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			var cmd tea.Cmd
 			m.run, cmd = m.run.Update(msg)
+			return m, cmd
+		case screenLog:
+			if msg.String() == "q" && !m.log.Searching() {
+				return m, m.quit()
+			}
+			var cmd tea.Cmd
+			m.log, cmd = m.log.Update(msg)
 			return m, cmd
 		}
 		return m.key(msg)
@@ -279,6 +334,8 @@ func (m Model) View() tea.View {
 		return m.picker.View()
 	case screenRun:
 		return screenView(m.run.View(), m.runHeight(), "j/k job  enter log  esc back  q quit")
+	case screenLog:
+		return screenView(m.log.View(), m.runHeight(), "j/k scroll  / search  n/N match  w wrap  r reload  esc back  q quit")
 	}
 
 	var bar []string

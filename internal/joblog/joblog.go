@@ -39,7 +39,7 @@ var markers = []struct {
 	{"##[error]", Error},
 	{"##[warning]", Warning},
 	{"##[notice]", Warning},
-	{"##[command]", Command},
+	{"[command]", Command},
 	{"##[debug]", Plain},
 }
 

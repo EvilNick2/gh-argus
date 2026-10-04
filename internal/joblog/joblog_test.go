@@ -37,7 +37,7 @@ func TestParseRecognisesMarkers(t *testing.T) {
 		"2026-10-04T22:00:18.3Z ##[endgroup]\n" +
 		"2026-10-04T22:00:18.4Z ##[error]Process completed with exit code 1.\n" +
 		"2026-10-04T22:00:18.5Z ##[warning]Node 16 is deprecated\n" +
-		"2026-10-04T22:00:18.6Z ##[command]/usr/bin/git version\n"
+		"2026-10-04T22:00:18.6Z [command]/usr/bin/git version\n"
 
 	got := Parse([]byte(body))
 	want := []Line{
