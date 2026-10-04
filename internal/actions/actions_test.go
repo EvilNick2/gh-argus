@@ -2,6 +2,7 @@ package actions
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -81,5 +82,62 @@ func TestAllowed(t *testing.T) {
 		if got := c.kind.Allowed(c.run); got != c.want {
 			t.Errorf("%v.Allowed(%s/%s) = %v, want %v", c.kind, c.run.Status, c.run.Conclusion, got, c.want)
 		}
+	}
+}
+
+func TestSetWorkflowEnabled(t *testing.T) {
+	for _, enabled := range []bool{true, false} {
+		var gotMethod, gotPath string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotMethod, gotPath = r.Method, r.URL.Path
+			w.WriteHeader(http.StatusNoContent)
+		}))
+		err := SetWorkflowEnabled(context.Background(), srv.Client(), srv.URL, "o/r", 42, enabled)
+		srv.Close()
+		want := "/repos/o/r/actions/workflows/42/disable"
+		if enabled {
+			want = "/repos/o/r/actions/workflows/42/enable"
+		}
+		if err != nil || gotMethod != http.MethodPut || gotPath != want {
+			t.Errorf("enabled=%v: err %v, sent %s %s, want PUT %s", enabled, err, gotMethod, gotPath, want)
+		}
+	}
+}
+
+func TestDispatchSendsRefAndInputs(t *testing.T) {
+	var gotPath string
+	var got struct {
+		Ref    string            `json:"ref"`
+		Inputs map[string]string `json:"inputs"`
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		if r.Method != http.MethodPost || r.Header.Get("Content-Type") != "application/json" {
+			t.Errorf("sent %s with Content-Type %q", r.Method, r.Header.Get("Content-Type"))
+		}
+		json.NewDecoder(r.Body).Decode(&got)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	err := Dispatch(context.Background(), srv.Client(), srv.URL, "o/r", 42, "main", map[string]string{"level": "debug"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotPath != "/repos/o/r/actions/workflows/42/dispatches" || got.Ref != "main" || got.Inputs["level"] != "debug" {
+		t.Errorf("sent %s %+v", gotPath, got)
+	}
+}
+
+func TestDispatchError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"message":"Workflow does not have 'workflow_dispatch' trigger"}`, http.StatusUnprocessableEntity)
+	}))
+	defer srv.Close()
+
+	err := Dispatch(context.Background(), srv.Client(), srv.URL, "o/r", 42, "main", nil)
+	var se *StatusError
+	if !errors.As(err, &se) || se.StatusCode != 422 || se.Message != "Workflow does not have 'workflow_dispatch' trigger" {
+		t.Fatalf("got %v", err)
 	}
 }

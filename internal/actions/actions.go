@@ -1,8 +1,9 @@
-// Package actions sends the run actions: rerun failed jobs, rerun all jobs
-// and cancel.
+// Package actions sends requests that change things on GitHub: run reruns
+// and cancels, and workflow enable, disable and dispatch.
 package actions
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -61,9 +62,47 @@ func (e *StatusError) Error() string {
 // which collaborators may not have.
 func Do(ctx context.Context, client *http.Client, baseURL, repo string, id int64, k Kind) error {
 	url := fmt.Sprintf("%s/repos/%s/actions/runs/%d/%s", strings.TrimSuffix(baseURL, "/"), repo, id, k.endpoint())
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
+	return send(ctx, client, http.MethodPost, url, nil)
+}
+
+// SetWorkflowEnabled enables or disables workflow id of repo.
+func SetWorkflowEnabled(ctx context.Context, client *http.Client, baseURL, repo string, id int64, enabled bool) error {
+	verb := "disable"
+	if enabled {
+		verb = "enable"
+	}
+	url := fmt.Sprintf("%s/repos/%s/actions/workflows/%d/%s", strings.TrimSuffix(baseURL, "/"), repo, id, verb)
+	return send(ctx, client, http.MethodPut, url, nil)
+}
+
+// Dispatch triggers workflow id of repo on ref, which must accept
+// workflow_dispatch. Inputs left out take their defaults from the workflow.
+func Dispatch(ctx context.Context, client *http.Client, baseURL, repo string, id int64, ref string, inputs map[string]string) error {
+	url := fmt.Sprintf("%s/repos/%s/actions/workflows/%d/dispatches", strings.TrimSuffix(baseURL, "/"), repo, id)
+	body := struct {
+		Ref    string            `json:"ref"`
+		Inputs map[string]string `json:"inputs,omitempty"`
+	}{ref, inputs}
+	return send(ctx, client, http.MethodPost, url, body)
+}
+
+// send makes a request with an optional JSON body and turns a non-2xx
+// response into a StatusError carrying the API's message.
+func send(ctx context.Context, client *http.Client, method, url string, body any) error {
+	var r io.Reader
+	if body != nil {
+		b, err := json.Marshal(body)
+		if err != nil {
+			return err
+		}
+		r = bytes.NewReader(b)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, url, r)
 	if err != nil {
 		return err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -73,8 +112,8 @@ func Do(ctx context.Context, client *http.Client, baseURL, repo string, id int64
 	if resp.StatusCode >= 200 && resp.StatusCode <= 299 {
 		return nil
 	}
-	body, _ := io.ReadAll(resp.Body)
+	msg, _ := io.ReadAll(resp.Body)
 	var apiErr struct{ Message string }
-	json.Unmarshal(body, &apiErr)
+	json.Unmarshal(msg, &apiErr)
 	return &StatusError{StatusCode: resp.StatusCode, Message: apiErr.Message}
 }
