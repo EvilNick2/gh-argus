@@ -51,21 +51,24 @@ func TestListFollowsPages(t *testing.T) {
 	}
 }
 
-func TestListQueryScopesAffiliationsWithoutOwnerAffiliations(t *testing.T) {
+func TestListQueryIncludesOrganisationRepos(t *testing.T) {
 	gql := &fakeGQL{responses: []string{`{"viewer":{"repositories":{"pageInfo":{},"nodes":[]}}}`}}
 
 	if _, err := List(context.Background(), gql); err != nil {
 		t.Fatal(err)
 	}
 	q := gql.queries[0]
-	for _, want := range []string{"affiliations: [OWNER, COLLABORATOR, ORGANIZATION_MEMBER]", "isArchived: false", "PUSHED_AT"} {
+	// Without ownerAffiliations the list drops all but 1 of the 117
+	// Bath-Impact-Lab repos.
+	for _, want := range []string{
+		" affiliations: [OWNER, COLLABORATOR, ORGANIZATION_MEMBER]",
+		"ownerAffiliations: [OWNER, COLLABORATOR, ORGANIZATION_MEMBER]",
+		"isArchived: false",
+		"PUSHED_AT",
+	} {
 		if !strings.Contains(q, want) {
 			t.Errorf("query missing %q", want)
 		}
-	}
-	// ownerAffiliations widens the list from 59 to 175 repos.
-	if strings.Contains(q, "ownerAffiliations") {
-		t.Error("query sets ownerAffiliations")
 	}
 }
 

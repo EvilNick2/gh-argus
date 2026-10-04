@@ -21,12 +21,13 @@ type Repo struct {
 	PushedAt time.Time
 }
 
-// ownerAffiliations is deliberately unset. It widens the list to every repo
-// in every organisation the viewer belongs to.
+// ownerAffiliations adds every repo of the viewer's organisations, not only
+// those the viewer has been given access to individually.
 const listQuery = `query($cursor: String) {
   viewer {
     repositories(first: 100, after: $cursor, isArchived: false,
       affiliations: [OWNER, COLLABORATOR, ORGANIZATION_MEMBER],
+      ownerAffiliations: [OWNER, COLLABORATOR, ORGANIZATION_MEMBER],
       orderBy: {field: PUSHED_AT, direction: DESC}) {
       pageInfo { hasNextPage endCursor }
       nodes { nameWithOwner name owner { login } isPrivate pushedAt }
@@ -34,8 +35,8 @@ const listQuery = `query($cursor: String) {
   }
 }`
 
-// List returns non-archived repos the viewer owns, collaborates on or can
-// reach through an organisation, most recently pushed first.
+// List returns non-archived repos the viewer owns, collaborates on or that
+// belong to the viewer's organisations, most recently pushed first.
 func List(ctx context.Context, gql GraphQL) ([]Repo, error) {
 	var out []Repo
 	var cursor interface{}
