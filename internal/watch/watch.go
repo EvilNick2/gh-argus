@@ -3,6 +3,8 @@ package watch
 
 import (
 	"context"
+	"fmt"
+	"slices"
 	"time"
 
 	"github.com/EvilNick2/gh-argus/internal/fetch"
@@ -28,15 +30,21 @@ func (iv Intervals) next(prev time.Duration, active bool) time.Duration {
 	}
 }
 
-// Event is emitted on the first successful poll (Initial, with Runs), when
-// runs change (Changes, with the new Runs), or when a poll fails (Err).
-// Unchanged polls emit nothing.
+// Event is emitted when a poll finds something to report. The first
+// successful poll is Initial. Later ones report Changes to runs and Jobs
+// changes for runs in flight. Runs is always the current snapshot. Err is set
+// when a request failed, alongside anything gathered before it.
 type Event struct {
 	Repo    string
 	Initial bool
 	Runs    []runs.Run
 	Changes []runs.Change
+	Jobs    []runs.JobChange
 	Err     error
+}
+
+func (e Event) empty() bool {
+	return !e.Initial && len(e.Changes) == 0 && len(e.Jobs) == 0 && e.Err == nil
 }
 
 type Watcher struct {
@@ -44,36 +52,24 @@ type Watcher struct {
 	Intervals Intervals
 }
 
+type state struct {
+	runs []runs.Run
+	have bool
+	jobs map[int64][]runs.Job
+}
+
 // Watch polls repo ("owner/name") until ctx is done.
 func (w *Watcher) Watch(ctx context.Context, repo string, out chan<- Event) {
-	path := "/repos/" + repo + "/actions/runs?per_page=30"
-	var (
-		prev     []runs.Run
-		have     bool
-		interval time.Duration
-	)
+	st := &state{jobs: map[int64][]runs.Job{}}
+	var interval time.Duration
 	for {
-		ev, active := Event{Repo: repo}, false
-		res, err := w.Fetcher.Get(ctx, path)
-		if err == nil && !res.NotModified {
-			var cur []runs.Run
-			if cur, err = runs.Decode(res.Body); err == nil {
-				if !have {
-					ev.Initial, ev.Runs = true, cur
-				} else if ev.Changes = runs.Diff(prev, cur); len(ev.Changes) > 0 {
-					ev.Runs = cur
-				}
-				prev, have = cur, true
-			}
-		}
+		ev := Event{Repo: repo}
+		ev.Err = w.poll(ctx, repo, st, &ev)
 		if ctx.Err() != nil {
 			return
 		}
-		ev.Err = err
-		if err == nil {
-			active = runs.Active(prev)
-		}
-		if ev.Initial || len(ev.Changes) > 0 || ev.Err != nil {
+		ev.Runs = st.runs
+		if !ev.empty() {
 			select {
 			case out <- ev:
 			case <-ctx.Done():
@@ -81,11 +77,60 @@ func (w *Watcher) Watch(ctx context.Context, repo string, out chan<- Event) {
 			}
 		}
 
-		interval = w.Intervals.next(interval, active)
+		interval = w.Intervals.next(interval, ev.Err == nil && runs.Active(st.runs))
 		select {
 		case <-time.After(interval):
 		case <-ctx.Done():
 			return
 		}
 	}
+}
+
+func (w *Watcher) poll(ctx context.Context, repo string, st *state, ev *Event) error {
+	res, err := w.Fetcher.Get(ctx, "/repos/"+repo+"/actions/runs?per_page=30")
+	if err != nil {
+		return err
+	}
+	prev := st.runs
+	if !res.NotModified {
+		cur, err := runs.Decode(res.Body)
+		if err != nil {
+			return err
+		}
+		if st.have {
+			ev.Changes = runs.Diff(prev, cur)
+		} else {
+			ev.Initial = true
+		}
+		st.runs, st.have = cur, true
+	}
+
+	// Runs active in the previous snapshot are included so the final state
+	// of their jobs is seen after they complete.
+	var ids []int64
+	for _, r := range slices.Concat(prev, st.runs) {
+		if r.Status != "completed" && !slices.Contains(ids, r.ID) {
+			ids = append(ids, r.ID)
+		}
+	}
+	for id := range st.jobs {
+		if !slices.Contains(ids, id) {
+			delete(st.jobs, id)
+		}
+	}
+	for _, id := range ids {
+		res, err := w.Fetcher.Get(ctx, fmt.Sprintf("/repos/%s/actions/runs/%d/jobs?per_page=100", repo, id))
+		if err != nil {
+			return err
+		}
+		// A 304 still carries the cached body, which matters when a run
+		// becomes active again after its jobs were dropped from st.jobs.
+		jobs, err := runs.DecodeJobs(res.Body)
+		if err != nil {
+			return err
+		}
+		ev.Jobs = append(ev.Jobs, runs.DiffJobs(st.jobs[id], jobs)...)
+		st.jobs[id] = jobs
+	}
+	return nil
 }

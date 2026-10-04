@@ -37,23 +37,40 @@ func TestNextInterval(t *testing.T) {
 // runsServer serves a single run whose status can be changed between polls,
 // with an ETag derived from that status so unchanged polls get a 304.
 type runsServer struct {
-	mu       sync.Mutex
-	status   string
-	failWith int
-	hits     int
+	mu        sync.Mutex
+	status    string
+	jobStatus string
+	failWith  int
+	hits      int
+	jobsHits  int
 }
 
-func (s *runsServer) set(status string) {
+func (s *runsServer) set(status, jobStatus string) {
 	s.mu.Lock()
-	s.status = status
+	s.status, s.jobStatus = status, jobStatus
 	s.mu.Unlock()
+}
+
+func (s *runsServer) jobsRequests() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.jobsHits
 }
 
 func (s *runsServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.hits++
-	if r.URL.Path != "/repos/o/r/actions/runs" {
+	var etag, body string
+	switch r.URL.Path {
+	case "/repos/o/r/actions/runs":
+		etag = `"run-` + s.status + `"`
+		body = fmt.Sprintf(`{"workflow_runs":[{"id":7,"name":"ci","status":%q}]}`, s.status)
+	case "/repos/o/r/actions/runs/7/jobs":
+		s.jobsHits++
+		etag = `"job-` + s.jobStatus + `"`
+		body = fmt.Sprintf(`{"jobs":[{"id":70,"run_id":7,"name":"build","status":%q}]}`, s.jobStatus)
+	default:
 		http.NotFound(w, r)
 		return
 	}
@@ -61,13 +78,12 @@ func (s *runsServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "nope", s.failWith)
 		return
 	}
-	etag := `"` + s.status + `"`
 	if r.Header.Get("If-None-Match") == etag {
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
 	w.Header().Set("ETag", etag)
-	fmt.Fprintf(w, `{"workflow_runs":[{"id":7,"name":"ci","status":%q}]}`, s.status)
+	fmt.Fprint(w, body)
 }
 
 func startWatch(t *testing.T, s *runsServer) <-chan Event {
@@ -98,7 +114,7 @@ func receive(t *testing.T, events <-chan Event) Event {
 }
 
 func TestWatchEmitsInitialSnapshot(t *testing.T) {
-	events := startWatch(t, &runsServer{status: "in_progress"})
+	events := startWatch(t, &runsServer{status: "in_progress", jobStatus: "in_progress"})
 
 	ev := receive(t, events)
 	if !ev.Initial || ev.Repo != "o/r" || len(ev.Runs) != 1 || ev.Runs[0].Status != "in_progress" {
@@ -107,7 +123,7 @@ func TestWatchEmitsInitialSnapshot(t *testing.T) {
 }
 
 func TestWatchEmitsChangeAndStaysQuietOn304(t *testing.T) {
-	s := &runsServer{status: "in_progress"}
+	s := &runsServer{status: "in_progress", jobStatus: "in_progress"}
 	events := startWatch(t, s)
 	receive(t, events)
 
@@ -119,7 +135,7 @@ func TestWatchEmitsChangeAndStaysQuietOn304(t *testing.T) {
 	default:
 	}
 
-	s.set("completed")
+	s.set("completed", "completed")
 	ev := receive(t, events)
 	if ev.Initial || len(ev.Changes) != 1 || ev.Changes[0].Prev.Status != "in_progress" ||
 		ev.Changes[0].Run.Status != "completed" {
@@ -147,5 +163,43 @@ func TestWatchReportsErrorsAndKeepsPolling(t *testing.T) {
 	}
 	if !ev.Initial || len(ev.Runs) != 1 {
 		t.Fatalf("got %+v, want initial snapshot after recovery", ev)
+	}
+}
+
+func TestWatchReportsJobsOfActiveRun(t *testing.T) {
+	events := startWatch(t, &runsServer{status: "in_progress", jobStatus: "in_progress"})
+
+	ev := receive(t, events)
+	if len(ev.Jobs) != 1 || ev.Jobs[0].Prev != nil || ev.Jobs[0].Job.Name != "build" || ev.Jobs[0].Job.RunID != 7 {
+		t.Fatalf("got jobs %+v, want new job build of run 7", ev.Jobs)
+	}
+}
+
+func TestWatchPollsJobsOnceMoreWhenRunCompletes(t *testing.T) {
+	s := &runsServer{status: "in_progress", jobStatus: "in_progress"}
+	events := startWatch(t, s)
+	receive(t, events)
+
+	s.set("completed", "completed")
+	ev := receive(t, events)
+	if len(ev.Jobs) != 1 || ev.Jobs[0].Prev == nil || ev.Jobs[0].Job.Status != "completed" {
+		t.Fatalf("got jobs %+v, want build in_progress -> completed", ev.Jobs)
+	}
+
+	hits := s.jobsRequests()
+	time.Sleep(30 * time.Millisecond)
+	if got := s.jobsRequests(); got != hits {
+		t.Errorf("jobs polled %d more times after run completed", got-hits)
+	}
+}
+
+func TestWatchDoesNotPollJobsOfCompletedRuns(t *testing.T) {
+	s := &runsServer{status: "completed", jobStatus: "completed"}
+	events := startWatch(t, s)
+	ev := receive(t, events)
+
+	time.Sleep(30 * time.Millisecond)
+	if len(ev.Jobs) != 0 || s.jobsRequests() != 0 {
+		t.Errorf("jobs fetched for a completed run: %d requests, event jobs %+v", s.jobsRequests(), ev.Jobs)
 	}
 }

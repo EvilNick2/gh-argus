@@ -65,14 +65,15 @@ func run() error {
 
 func printEvent(ev watch.Event) {
 	ts := time.Now().Format("15:04:05")
-	switch {
-	case ev.Err != nil:
+	if ev.Err != nil {
 		fmt.Printf("%s %s error: %v\n", ts, ev.Repo, ev.Err)
+	}
+	switch {
 	case ev.Initial:
 		fmt.Printf("%s %s watching, %d recent runs\n", ts, ev.Repo, len(ev.Runs))
 		for i, r := range ev.Runs {
 			if i == 0 || r.Status != "completed" {
-				fmt.Printf("%s %s %s %s\n", ts, ev.Repo, describe(r), state(r))
+				fmt.Printf("%s %s %s %s\n", ts, ev.Repo, describe(r), state(r.Status, r.Conclusion))
 			}
 		}
 	default:
@@ -80,11 +81,36 @@ func printEvent(ev watch.Event) {
 		for _, c := range slices.Backward(ev.Changes) {
 			from := "new"
 			if c.Prev != nil {
-				from = state(*c.Prev)
+				from = state(c.Prev.Status, c.Prev.Conclusion)
 			}
-			fmt.Printf("%s %s %s %s -> %s\n", ts, ev.Repo, describe(c.Run), from, state(c.Run))
+			fmt.Printf("%s %s %s %s -> %s\n", ts, ev.Repo, describe(c.Run), from, state(c.Run.Status, c.Run.Conclusion))
 		}
 	}
+	for _, c := range ev.Jobs {
+		prefix := fmt.Sprintf("%s %s %s > %s", ts, ev.Repo, runLabel(ev.Runs, c.Job.RunID), c.Job.Name)
+		switch {
+		case c.Prev == nil:
+			fmt.Printf("%s %s\n", prefix, state(c.Job.Status, c.Job.Conclusion))
+		case c.Prev.Status != c.Job.Status || c.Prev.Conclusion != c.Job.Conclusion:
+			fmt.Printf("%s %s -> %s\n", prefix, state(c.Prev.Status, c.Prev.Conclusion), state(c.Job.Status, c.Job.Conclusion))
+		}
+		for _, sc := range c.Steps {
+			from := "new"
+			if sc.Prev != nil {
+				from = state(sc.Prev.Status, sc.Prev.Conclusion)
+			}
+			fmt.Printf("%s > %d %s %s -> %s\n", prefix, sc.Step.Number, sc.Step.Name, from, state(sc.Step.Status, sc.Step.Conclusion))
+		}
+	}
+}
+
+func runLabel(rs []runs.Run, id int64) string {
+	for _, r := range rs {
+		if r.ID == id {
+			return fmt.Sprintf("#%d %s", r.RunNumber, r.Name)
+		}
+	}
+	return fmt.Sprintf("run %d", id)
 }
 
 func describe(r runs.Run) string {
@@ -95,9 +121,9 @@ func describe(r runs.Run) string {
 	return s
 }
 
-func state(r runs.Run) string {
-	if r.Conclusion != "" {
-		return r.Status + "/" + r.Conclusion
+func state(status, conclusion string) string {
+	if conclusion != "" {
+		return status + "/" + conclusion
 	}
-	return r.Status
+	return status
 }
