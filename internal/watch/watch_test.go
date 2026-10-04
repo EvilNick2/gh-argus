@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/EvilNick2/gh-argus/internal/fetch"
+	"github.com/EvilNick2/gh-argus/internal/runs"
 )
 
 func TestNextInterval(t *testing.T) {
@@ -98,7 +99,7 @@ func startWatch(t *testing.T, s *runsServer) <-chan Event {
 		Intervals: Intervals{Active: 5 * time.Millisecond, IdleMin: 5 * time.Millisecond, IdleMax: 5 * time.Millisecond},
 	}
 	events := make(chan Event, 16)
-	go w.Watch(ctx, "o/r", events)
+	go w.Watch(ctx, "o/r", nil, events)
 	return events
 }
 
@@ -216,7 +217,7 @@ func TestNewWatchOnSharedFetcherEmitsInitialFrom304(t *testing.T) {
 	for i := range 2 {
 		ctx, cancel := context.WithCancel(context.Background())
 		events := make(chan Event, 16)
-		go w.Watch(ctx, "o/r", events)
+		go w.Watch(ctx, "o/r", nil, events)
 		ev := receive(t, events)
 		cancel()
 		if !ev.Initial || len(ev.Runs) != 1 {
@@ -277,5 +278,62 @@ func TestWatchRunReportsErrors(t *testing.T) {
 
 	if ev := receiveRun(t, events); ev.Err == nil {
 		t.Fatalf("got %+v, want error", ev)
+	}
+}
+
+func startSeededWatch(t *testing.T, s *runsServer, seed *Seed) <-chan Event {
+	t.Helper()
+	srv := httptest.NewServer(s)
+	t.Cleanup(srv.Close)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	w := &Watcher{
+		Fetcher:   fetch.New(srv.Client(), srv.URL),
+		Intervals: Intervals{Active: 5 * time.Millisecond, IdleMin: 5 * time.Millisecond, IdleMax: 5 * time.Millisecond},
+	}
+	events := make(chan Event, 16)
+	go w.Watch(ctx, "o/r", seed, events)
+	return events
+}
+
+func TestSeedConfirmedBy304IsInitialSnapshot(t *testing.T) {
+	s := &runsServer{status: "completed", jobStatus: "completed"}
+	seed := &Seed{ETag: `"run-completed"`, Runs: []runs.Run{{ID: 7, Name: "ci", Status: "completed"}}}
+	events := startSeededWatch(t, s, seed)
+
+	ev := receive(t, events)
+	if ev.Err != nil || !ev.Initial || len(ev.Runs) != 1 || ev.Runs[0].Name != "ci" || len(ev.Changes) != 0 {
+		t.Fatalf("got %+v, want the seeded runs as the initial snapshot with no changes", ev)
+	}
+	if ev.ETag != `"run-completed"` {
+		t.Errorf("ETag %q", ev.ETag)
+	}
+}
+
+func TestStaleSeedReportsChangesSinceLastSession(t *testing.T) {
+	s := &runsServer{status: "completed", jobStatus: "completed"}
+	seed := &Seed{ETag: `"run-in_progress"`, Runs: []runs.Run{{ID: 7, Name: "ci", Status: "in_progress"}}}
+	events := startSeededWatch(t, s, seed)
+
+	ev := receive(t, events)
+	if !ev.Initial || len(ev.Runs) != 1 || ev.Runs[0].Status != "completed" {
+		t.Fatalf("got %+v, want the fresh runs as the initial snapshot", ev)
+	}
+	if len(ev.Changes) != 1 || ev.Changes[0].Prev == nil || ev.Changes[0].Prev.Status != "in_progress" {
+		t.Errorf("changes %+v, want in_progress -> completed since the last session", ev.Changes)
+	}
+	if ev.ETag != `"run-completed"` {
+		t.Errorf("ETag %q, want the new one", ev.ETag)
+	}
+}
+
+func TestChangeEventsCarryETag(t *testing.T) {
+	s := &runsServer{status: "in_progress", jobStatus: "in_progress"}
+	events := startWatch(t, s)
+	receive(t, events)
+
+	s.set("completed", "completed")
+	if ev := receive(t, events); ev.ETag != `"run-completed"` {
+		t.Errorf("change event ETag %q", ev.ETag)
 	}
 }

@@ -133,3 +133,56 @@ func TestErrorStatusReturnsStatusError(t *testing.T) {
 		t.Fatalf("got err %v, want *StatusError with 404", err)
 	}
 }
+
+func TestResultCarriesETag(t *testing.T) {
+	s := &etagServer{etag: `W/"a"`, body: `{}`}
+	f := newFetcher(t, s)
+	ctx := context.Background()
+
+	first, err := f.Get(ctx, "/runs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := f.Get(ctx, "/runs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.ETag != `W/"a"` || second.ETag != `W/"a"` {
+		t.Errorf("ETags %q then %q, want W/\"a\" on the 200 and the 304", first.ETag, second.ETag)
+	}
+}
+
+func TestSeedSendsStoredETagAndReturnsNoBodyOn304(t *testing.T) {
+	s := &etagServer{etag: `W/"a"`, body: `{"n":1}`}
+	f := newFetcher(t, s)
+
+	f.Seed("/runs", `W/"a"`)
+	res, err := f.Get(context.Background(), "/runs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.seen[0] != `W/"a"` {
+		t.Errorf("seeded request sent If-None-Match %q", s.seen[0])
+	}
+	if !res.NotModified || res.Body != nil {
+		t.Errorf("got NotModified=%v body=%q, want a bodiless 304", res.NotModified, res.Body)
+	}
+}
+
+func TestSeedDoesNotReplaceCachedBody(t *testing.T) {
+	s := &etagServer{etag: `W/"a"`, body: `{"n":1}`}
+	f := newFetcher(t, s)
+	ctx := context.Background()
+
+	if _, err := f.Get(ctx, "/runs"); err != nil {
+		t.Fatal(err)
+	}
+	f.Seed("/runs", `W/"old"`)
+	res, err := f.Get(ctx, "/runs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.NotModified || string(res.Body) != `{"n":1}` {
+		t.Errorf("got NotModified=%v body=%q, want the cached body kept", res.NotModified, res.Body)
+	}
+}

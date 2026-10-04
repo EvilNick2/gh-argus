@@ -40,7 +40,14 @@ type Event struct {
 	Runs    []runs.Run
 	Changes []runs.Change
 	Jobs    []runs.JobChange
+	ETag    string
 	Err     error
+}
+
+// Seed is a repo's runs and their ETag saved by an earlier session.
+type Seed struct {
+	ETag string
+	Runs []runs.Run
 }
 
 func (e Event) empty() bool {
@@ -56,11 +63,21 @@ type state struct {
 	runs []runs.Run
 	have bool
 	jobs map[int64][]runs.Job
+	seed *Seed
 }
 
-// Watch polls repo ("owner/name") until ctx is done.
-func (w *Watcher) Watch(ctx context.Context, repo string, out chan<- Event) {
-	st := &state{jobs: map[int64][]runs.Job{}}
+func runsPath(repo string) string {
+	return "/repos/" + repo + "/actions/runs?per_page=30"
+}
+
+// Watch polls repo ("owner/name") until ctx is done. With a seed, the first
+// poll is conditional on the seed's ETag. A 304 makes the seeded runs the
+// initial snapshot, and a 200 reports what changed since they were saved.
+func (w *Watcher) Watch(ctx context.Context, repo string, seed *Seed, out chan<- Event) {
+	st := &state{jobs: map[int64][]runs.Job{}, seed: seed}
+	if seed != nil {
+		w.Fetcher.Seed(runsPath(repo), seed.ETag)
+	}
 	var interval time.Duration
 	for {
 		ev := Event{Repo: repo}
@@ -87,21 +104,31 @@ func (w *Watcher) Watch(ctx context.Context, repo string, out chan<- Event) {
 }
 
 func (w *Watcher) poll(ctx context.Context, repo string, st *state, ev *Event) error {
-	res, err := w.Fetcher.Get(ctx, "/repos/"+repo+"/actions/runs?per_page=30")
+	res, err := w.Fetcher.Get(ctx, runsPath(repo))
 	if err != nil {
 		return err
 	}
+	ev.ETag = res.ETag
 	prev := st.runs
 	// The fetcher may be shared with an earlier watch, so even the first
-	// response can be a 304. Its cached body still makes the first snapshot.
+	// response can be a 304. Its cached body still makes the first snapshot,
+	// and a bodiless 304 means the seed is current.
 	if !res.NotModified || !st.have {
-		cur, err := runs.Decode(res.Body)
-		if err != nil {
-			return err
+		var cur []runs.Run
+		switch {
+		case res.Body == nil && st.seed != nil:
+			cur = st.seed.Runs
+		default:
+			if cur, err = runs.Decode(res.Body); err != nil {
+				return err
+			}
 		}
-		if st.have {
+		switch {
+		case st.have:
 			ev.Changes = runs.Diff(prev, cur)
-		} else {
+		case st.seed != nil:
+			ev.Initial, ev.Changes = true, runs.Diff(st.seed.Runs, cur)
+		default:
 			ev.Initial = true
 		}
 		st.runs, st.have = cur, true

@@ -29,10 +29,24 @@ type entry struct {
 
 type Result struct {
 	Body []byte
-	// NotModified reports a 304, in which case Body is the cached copy.
+	// NotModified reports a 304, in which case Body is the cached copy, or
+	// nil when the ETag came from Seed.
 	NotModified bool
 	// RateRemaining is X-RateLimit-Remaining, or -1 when absent.
 	RateRemaining int
+	// ETag validates Body, for callers that store it between sessions.
+	ETag string
+}
+
+// Seed gives path an ETag from an earlier session, so the first request is
+// conditional. A 304 then has no body, so the caller must hold the data the
+// ETag validates. Paths already fetched in this session are left alone.
+func (f *Fetcher) Seed(path, etag string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.cache[path]; !ok {
+		f.cache[path] = entry{etag: etag}
+	}
 }
 
 type StatusError struct {
@@ -82,10 +96,10 @@ func (f *Fetcher) Get(ctx context.Context, path string) (Result, error) {
 
 	switch {
 	case resp.StatusCode == http.StatusNotModified && ok:
-		res.Body, res.NotModified = cached.body, true
+		res.Body, res.NotModified, res.ETag = cached.body, true, cached.etag
 	case resp.StatusCode >= 200 && resp.StatusCode <= 299:
-		res.Body = body
-		if etag := resp.Header.Get("ETag"); etag != "" {
+		res.Body, res.ETag = body, resp.Header.Get("ETag")
+		if etag := res.ETag; etag != "" {
 			f.mu.Lock()
 			f.cache[path] = entry{etag: etag, body: body}
 			f.mu.Unlock()
