@@ -203,3 +203,24 @@ func TestWatchDoesNotPollJobsOfCompletedRuns(t *testing.T) {
 		t.Errorf("jobs fetched for a completed run: %d requests, event jobs %+v", s.jobsRequests(), ev.Jobs)
 	}
 }
+
+func TestNewWatchOnSharedFetcherEmitsInitialFrom304(t *testing.T) {
+	s := &runsServer{status: "completed", jobStatus: "completed"}
+	srv := httptest.NewServer(s)
+	t.Cleanup(srv.Close)
+	w := &Watcher{
+		Fetcher:   fetch.New(srv.Client(), srv.URL),
+		Intervals: Intervals{Active: 5 * time.Millisecond, IdleMin: 5 * time.Millisecond, IdleMax: 5 * time.Millisecond},
+	}
+
+	for i := range 2 {
+		ctx, cancel := context.WithCancel(context.Background())
+		events := make(chan Event, 16)
+		go w.Watch(ctx, "o/r", events)
+		ev := receive(t, events)
+		cancel()
+		if !ev.Initial || len(ev.Runs) != 1 {
+			t.Fatalf("watch %d: got %+v, want an initial snapshot", i+1, ev)
+		}
+	}
+}

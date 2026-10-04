@@ -92,7 +92,9 @@ func (w *Watcher) poll(ctx context.Context, repo string, st *state, ev *Event) e
 		return err
 	}
 	prev := st.runs
-	if !res.NotModified {
+	// The fetcher may be shared with an earlier watch, so even the first
+	// response can be a 304. Its cached body still makes the first snapshot.
+	if !res.NotModified || !st.have {
 		cur, err := runs.Decode(res.Body)
 		if err != nil {
 			return err
