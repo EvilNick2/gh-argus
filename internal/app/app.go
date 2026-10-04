@@ -42,6 +42,8 @@ type Deps struct {
 	// DispatchSpec returns the ref to dispatch on, normally the default
 	// branch, and what the workflow file says about dispatch.
 	DispatchSpec func(ctx context.Context, repo string, wf workflows.Workflow) (string, workflows.DispatchSpec, error)
+	// Branches lists a repo's branches for the dispatch form.
+	Branches func(ctx context.Context, repo string) ([]string, error)
 	// Dispatch triggers a workflow on ref with inputs.
 	Dispatch func(ctx context.Context, repo string, id int64, ref string, inputs map[string]string) error
 	// SetWorkflow enables or disables a workflow.
@@ -102,13 +104,14 @@ type wfLoadedMsg struct {
 
 // specMsg carries what a workflow file says about dispatch.
 type specMsg struct {
-	gen  int
-	edit bool // the user asked to edit inputs
-	repo string
-	wf   workflows.Workflow
-	ref  string
-	spec workflows.DispatchSpec
-	err  error
+	gen      int
+	edit     bool // the user asked to edit inputs
+	repo     string
+	wf       workflows.Workflow
+	ref      string
+	branches []string
+	spec     workflows.DispatchSpec
+	err      error
 }
 
 // pending is a change to GitHub waiting for y/n.
@@ -155,7 +158,6 @@ type Model struct {
 	form     dispatchform.Model
 	formRepo string
 	formWF   workflows.Workflow
-	formRef  string
 	logGen   int
 	logJob   runs.Job
 	logRep   string
@@ -372,7 +374,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case dispatchform.SubmitMsg:
 		m.screen = screenTabs
-		dispatch, repo, wf, ref, inputs := m.deps.Dispatch, m.formRepo, m.formWF, m.formRef, msg.Inputs
+		dispatch, repo, wf, ref, inputs := m.deps.Dispatch, m.formRepo, m.formWF, msg.Ref, msg.Inputs
 		p := pending{
 			success: fmt.Sprintf("dispatched %s on %s", wf.Name, ref),
 			failure: fmt.Sprintf("dispatch %s", wf.Name),
@@ -507,8 +509,9 @@ func (m Model) askWorkflow(enable bool) Model {
 }
 
 // checkDispatch refuses dynamic and disabled workflows, otherwise fetches
-// what the workflow file says about dispatch. With edit set, the inputs form
-// opens even when every input has a default.
+// what the workflow file says about dispatch and the repo's branches. With
+// edit set, the form opens even when every input has a default, so the
+// branch can be chosen.
 func (m Model) checkDispatch(edit bool) (tea.Model, tea.Cmd) {
 	repo, wf, ok := m.wfs.Current()
 	switch {
@@ -522,10 +525,12 @@ func (m Model) checkDispatch(edit bool) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.flash = fmt.Sprintf("checking %s", wf.Name)
-	gen, get := m.gen, m.deps.DispatchSpec
+	gen, get, list := m.gen, m.deps.DispatchSpec, m.deps.Branches
 	return m, func() tea.Msg {
 		ref, spec, err := get(context.Background(), repo, wf)
-		return specMsg{gen: gen, edit: edit, repo: repo, wf: wf, ref: ref, spec: spec, err: err}
+		// Without the branch list the field still takes any typed ref.
+		branches, _ := list(context.Background(), repo)
+		return specMsg{gen: gen, edit: edit, repo: repo, wf: wf, ref: ref, branches: branches, spec: spec, err: err}
 	}
 }
 
@@ -538,10 +543,10 @@ func (m Model) offerDispatch(msg specMsg) Model {
 		m.flash, m.flashErr = fmt.Sprintf("checking %s failed: %v", name, msg.err), true
 	case !msg.spec.Dispatchable:
 		m.flash = fmt.Sprintf("%s has no workflow_dispatch trigger", name)
-	case msg.spec.NeedsInput() || msg.edit && len(msg.spec.Inputs) > 0:
+	case msg.spec.NeedsInput() || msg.edit:
 		m.flash = ""
-		m.formRepo, m.formWF, m.formRef = msg.repo, msg.wf, msg.ref
-		m.form = dispatchform.New(msg.repo, msg.wf, msg.ref, msg.spec.Inputs).SetSize(m.width, m.runHeight())
+		m.formRepo, m.formWF = msg.repo, msg.wf
+		m.form = dispatchform.New(msg.repo, msg.wf, msg.ref, msg.branches, msg.spec.Inputs).SetSize(m.width, m.runHeight())
 		m.screen = screenForm
 	default:
 		dispatch, repo, id, ref := m.deps.Dispatch, msg.repo, msg.wf.ID, msg.ref
@@ -622,7 +627,7 @@ func (m Model) View() tea.View {
 	case screenRun:
 		return screenView(m.run.View(), m.runHeight(), m.footer("j/k job  enter log  r/R rerun  c cancel  esc back  q quit"))
 	case screenForm:
-		return screenView(m.form.View(), m.runHeight(), m.footer("tab next  space toggle  left/right choose  enter run  esc cancel"))
+		return screenView(m.form.View(), m.runHeight(), m.footer("tab next  left/right branch or choice  space toggle  enter run  esc cancel"))
 	case screenLog:
 		return screenView(m.log.View(), m.runHeight(), m.footer("j/k scroll  / search  n/N match  w wrap  r reload  esc back  q quit"))
 	}
@@ -646,7 +651,7 @@ func (m Model) View() tea.View {
 	case 0:
 	case 1:
 		body = m.wfs.View()
-		help = "j/k move  enter run  i inputs  e enable  d disable  1-5 tabs  p repos  q quit"
+		help = "j/k move  enter run  i branch and inputs  e enable  d disable  1-5 tabs  p repos  q quit"
 	default:
 		t := tabs[m.tab]
 		body = dimStyle.Render(fmt.Sprintf("%s is not built yet, it lands in milestone %d.", t.name, t.milestone))

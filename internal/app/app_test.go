@@ -85,6 +85,9 @@ func (f *fakeWatch) deps() Deps {
 		DispatchSpec: func(ctx context.Context, repo string, wf workflows.Workflow) (string, workflows.DispatchSpec, error) {
 			return "main", f.specs[wf.ID], nil
 		},
+		Branches: func(ctx context.Context, repo string) ([]string, error) {
+			return []string{"dev", "main"}, nil
+		},
 		Dispatch: func(ctx context.Context, repo string, id int64, ref string, inputs map[string]string) error {
 			f.dispatches = append(f.dispatches, fmt.Sprintf("%s/%d@%s %v", repo, id, ref, inputs))
 			return nil
@@ -849,5 +852,26 @@ func TestEscClosesFormWithoutDispatching(t *testing.T) {
 	}
 	if len(f.dispatches) != 0 {
 		t.Errorf("dispatched %v", f.dispatches)
+	}
+}
+
+func TestIPicksBranchForWorkflowWithoutInputs(t *testing.T) {
+	f := &fakeWatch{
+		wfs:   map[string][]workflows.Workflow{"o/a": {buildWF}},
+		specs: map[int64]workflows.DispatchSpec{1: {Dispatchable: true}},
+	}
+	m := openForm(t, f, keyMsg("i"))
+
+	if v := view(m); !strings.Contains(v, "run Build and publish on main") || !strings.Contains(v, "2 branches") {
+		t.Fatalf("form not shown with branches:\n%s", v)
+	}
+	m, _ = step(m, tea.KeyPressMsg{Code: tea.KeyLeft})
+	m, cmd := step(m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = runAll(m, cmd)
+	if len(f.dispatches) != 1 || f.dispatches[0] != "o/a/1@dev map[]" {
+		t.Errorf("dispatches %v", f.dispatches)
+	}
+	if v := view(m); !strings.Contains(v, "dispatched Build and publish on dev") {
+		t.Errorf("view:\n%s", v)
 	}
 }

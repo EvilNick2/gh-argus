@@ -147,6 +147,21 @@ func run() error {
 			spec, err := workflows.ParseDispatch(src)
 			return info.DefaultBranch, spec, err
 		},
+		Branches: func(ctx context.Context, repo string) ([]string, error) {
+			res, err := w.Fetcher.Get(ctx, "/repos/"+repo+"/branches?per_page=100")
+			if err != nil {
+				return nil, err
+			}
+			var page []struct{ Name string }
+			if err := json.Unmarshal(res.Body, &page); err != nil {
+				return nil, err
+			}
+			names := make([]string, len(page))
+			for i, b := range page {
+				names[i] = b.Name
+			}
+			return names, nil
+		},
 		Dispatch: func(ctx context.Context, repo string, id int64, ref string, inputs map[string]string) error {
 			return actions.Dispatch(ctx, client, apiURL, repo, id, ref, inputs)
 		},

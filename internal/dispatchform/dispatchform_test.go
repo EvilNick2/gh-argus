@@ -20,8 +20,10 @@ var inputs = []workflows.Input{
 	{Name: "count", Type: "number", Default: "1"},
 }
 
+var branches = []string{"dev", "main", "release"}
+
 func newModel(ins []workflows.Input) Model {
-	return New("o/r", wf, "main", ins).SetSize(80, 20)
+	return New("o/r", wf, "main", branches, ins).SetSize(80, 20)
 }
 
 func key(s string) tea.Msg {
@@ -69,8 +71,8 @@ func send(m Model, msgs ...tea.Msg) (Model, tea.Cmd) {
 
 func view(m Model) string { return ansi.Strip(m.View()) }
 
-// submitted runs cmd and returns the inputs of the SubmitMsg it sends.
-func submitted(t *testing.T, cmd tea.Cmd) map[string]string {
+// submit runs cmd and returns the SubmitMsg it sends.
+func submit(t *testing.T, cmd tea.Cmd) SubmitMsg {
 	t.Helper()
 	if cmd == nil {
 		t.Fatal("no command")
@@ -79,7 +81,13 @@ func submitted(t *testing.T, cmd tea.Cmd) map[string]string {
 	if !ok {
 		t.Fatalf("got %#v, want SubmitMsg", cmd())
 	}
-	return msg.Inputs
+	return msg
+}
+
+// submitted runs cmd and returns the inputs of the SubmitMsg it sends.
+func submitted(t *testing.T, cmd tea.Cmd) map[string]string {
+	t.Helper()
+	return submit(t, cmd).Inputs
 }
 
 func TestShowsFieldsWithDefaultsAndDescriptions(t *testing.T) {
@@ -181,7 +189,7 @@ func TestEscCancels(t *testing.T) {
 
 func TestLongDescriptionsWrapToWidth(t *testing.T) {
 	long := "Readable tag for this build, e.g. clap-music-1. It is what EMBEDDER_VERSION pins, so name the model, not the repo version."
-	m := New("o/r", wf, "main", []workflows.Input{{Name: "tag", Description: long}}).SetSize(50, 20)
+	m := New("o/r", wf, "main", nil, []workflows.Input{{Name: "tag", Description: long}}).SetSize(50, 20)
 
 	v := view(m)
 	for _, l := range strings.Split(v, "\n") {
@@ -191,5 +199,82 @@ func TestLongDescriptionsWrapToWidth(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(strings.Fields(v), " "), "not the repo version.") {
 		t.Errorf("end of description lost:\n%s", v)
+	}
+}
+
+func TestBranchDefaultsToGivenRef(t *testing.T) {
+	m := newModel(inputs)
+
+	if v := view(m); !strings.Contains(v, "branch") || !strings.Contains(v, "main") {
+		t.Errorf("view:\n%s", v)
+	}
+	_, cmd := send(m, key("enter"))
+	if got := submit(t, cmd).Ref; got != "main" {
+		t.Errorf("Ref %q, want main", got)
+	}
+}
+
+func TestCursorStartsOnFirstInputThenBranchIsAbove(t *testing.T) {
+	m := newModel(inputs)
+
+	// shift+tab from the first input reaches the branch field.
+	m, _ = send(m, key("shift+tab"))
+	m, _ = send(m, key("backspace"), key("backspace"), key("backspace"), key("backspace"))
+	_, cmd := send(m, append(typed("v1.0.0"), key("enter"))...)
+	got := submit(t, cmd)
+	if got.Ref != "v1.0.0" || got.Inputs["tag"] != "" {
+		t.Errorf("got %+v, want ref v1.0.0 typed into the branch field", got)
+	}
+}
+
+func TestNoInputsStartsOnBranch(t *testing.T) {
+	m := newModel(nil)
+
+	_, cmd := send(m, key("right"), key("enter"))
+	if got := submit(t, cmd).Ref; got != "release" {
+		t.Errorf("Ref %q, want release, the branch after main", got)
+	}
+}
+
+func TestLeftRightCycleBranches(t *testing.T) {
+	m := newModel(nil)
+
+	m, _ = send(m, key("left"))
+	_, cmd := send(m, key("enter"))
+	if got := submit(t, cmd).Ref; got != "dev" {
+		t.Errorf("left from main: %q, want dev", got)
+	}
+	m, _ = send(m, key("left"))
+	_, cmd = send(m, key("enter"))
+	if got := submit(t, cmd).Ref; got != "release" {
+		t.Errorf("left once more wraps to %q, want release", got)
+	}
+}
+
+func TestTypedBranchCyclesFromFirst(t *testing.T) {
+	m := newModel(nil)
+
+	for range 4 {
+		m, _ = send(m, key("backspace"))
+	}
+	m, _ = send(m, append(typed("feat"), key("right"))...)
+	_, cmd := send(m, key("enter"))
+	if got := submit(t, cmd).Ref; got != "dev" {
+		t.Errorf("right from an unlisted name: %q, want the first branch", got)
+	}
+}
+
+func TestEmptyBranchBlocksSubmit(t *testing.T) {
+	m := newModel(nil)
+
+	for range 4 {
+		m, _ = send(m, key("backspace"))
+	}
+	m, cmd := send(m, key("enter"))
+	if cmd != nil {
+		t.Fatal("submitted with no branch")
+	}
+	if v := view(m); !strings.Contains(v, "branch is required") {
+		t.Errorf("view:\n%s", v)
 	}
 }

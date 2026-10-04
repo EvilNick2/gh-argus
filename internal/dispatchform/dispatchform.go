@@ -18,6 +18,7 @@ import (
 // SubmitMsg carries the inputs to dispatch with. Empty values are left out
 // so GitHub applies the workflow's defaults.
 type SubmitMsg struct {
+	Ref    string
 	Inputs map[string]string
 }
 
@@ -29,10 +30,15 @@ type field struct {
 	value string
 }
 
+// branchType marks field 0, the ref to dispatch on. It is not one of the
+// input types a workflow file can declare.
+const branchType = "branch"
+
 type Model struct {
-	repo   string
-	wf     workflows.Workflow
-	ref    string
+	repo     string
+	wf       workflows.Workflow
+	branches []string
+	// fields[0] is the branch, the workflow's inputs follow.
 	fields []field
 	cursor int
 	err    string
@@ -40,8 +46,15 @@ type Model struct {
 	width, height int
 }
 
-func New(repo string, wf workflows.Workflow, ref string, inputs []workflows.Input) Model {
-	m := Model{repo: repo, wf: wf, ref: ref}
+// New opens the form on ref with the cursor on the first input, or on the
+// branch when there are no inputs. Left and right cycle the branch through
+// branches. Any ref can be typed, tags included.
+func New(repo string, wf workflows.Workflow, ref string, branches []string, inputs []workflows.Input) Model {
+	m := Model{repo: repo, wf: wf, branches: branches}
+	m.fields = append(m.fields, field{in: workflows.Input{Name: "branch", Type: branchType, Required: true}, value: ref})
+	if len(inputs) > 0 {
+		m.cursor = 1
+	}
 	for _, in := range inputs {
 		v := in.Default
 		switch {
@@ -90,29 +103,45 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		if k.String() == "space" {
 			f.value = strconv.FormatBool(f.value != "true")
 		}
-	case "choice":
+	case "choice", branchType:
 		opts := f.in.Options
-		if len(opts) == 0 {
+		if f.in.Type == branchType {
+			opts = m.branches
+		}
+		if len(opts) == 0 || k.String() != "left" && k.String() != "right" {
+			if f.in.Type == branchType {
+				editText(f, k)
+			}
 			break
 		}
-		i := max(0, slices.Index(opts, f.value))
-		switch k.String() {
-		case "right":
+		// From a value not in the list, right goes to the first option and
+		// left to the last.
+		i := slices.Index(opts, f.value)
+		switch {
+		case k.String() == "right" && i < 0:
+			f.value = opts[0]
+		case k.String() == "left" && i < 0:
+			f.value = opts[len(opts)-1]
+		case k.String() == "right":
 			f.value = opts[(i+1)%len(opts)]
-		case "left":
+		default:
 			f.value = opts[(i-1+len(opts))%len(opts)]
 		}
 	default:
-		switch {
-		case k.String() == "backspace":
-			if r := []rune(f.value); len(r) > 0 {
-				f.value = string(r[:len(r)-1])
-			}
-		case k.Text != "":
-			f.value += k.Text
-		}
+		editText(f, k)
 	}
 	return m, nil
+}
+
+func editText(f *field, k tea.KeyPressMsg) {
+	switch {
+	case k.String() == "backspace":
+		if r := []rune(f.value); len(r) > 0 {
+			f.value = string(r[:len(r)-1])
+		}
+	case k.Text != "":
+		f.value += k.Text
+	}
 }
 
 func (m Model) submit() (Model, tea.Cmd) {
@@ -129,11 +158,12 @@ func (m Model) submit() (Model, tea.Cmd) {
 				return m, nil
 			}
 		}
-		if v != "" {
+		if v != "" && i > 0 {
 			inputs[f.in.Name] = v
 		}
 	}
-	return m, func() tea.Msg { return SubmitMsg{Inputs: inputs} }
+	ref := strings.TrimSpace(m.fields[0].value)
+	return m, func() tea.Msg { return SubmitMsg{Ref: ref, Inputs: inputs} }
 }
 
 var (
@@ -145,11 +175,8 @@ var (
 
 func (m Model) View() string {
 	lines := []string{
-		boldStyle.Render(fmt.Sprintf("run %s on %s", m.wf.Name, m.ref)) + "  " + dimStyle.Render(m.repo),
+		boldStyle.Render(fmt.Sprintf("run %s on %s", m.wf.Name, m.fields[0].value)) + "  " + dimStyle.Render(m.repo),
 		errStyle.Render(m.err),
-	}
-	if len(m.fields) == 0 {
-		lines = append(lines, dimStyle.Render("no inputs"))
 	}
 	nameW := 0
 	for _, f := range m.fields {
@@ -157,7 +184,7 @@ func (m Model) View() string {
 	}
 	for i, f := range m.fields {
 		name := f.in.Name
-		if f.in.Required {
+		if f.in.Required && f.in.Type != branchType {
 			name += "*"
 		}
 		name += strings.Repeat(" ", nameW-len(name))
@@ -177,6 +204,9 @@ func (m Model) View() string {
 			if i == m.cursor {
 				value += "_"
 			}
+			if f.in.Type == branchType && i == m.cursor && len(m.branches) > 0 {
+				value += dimStyle.Render(fmt.Sprintf("  left/right picks from %d branches", len(m.branches)))
+			}
 		}
 		marker := "  "
 		if i == m.cursor {
@@ -188,6 +218,9 @@ func (m Model) View() string {
 				lines = append(lines, "    "+dimStyle.Render(d))
 			}
 		}
+	}
+	if len(m.fields) == 1 {
+		lines = append(lines, "", dimStyle.Render("no inputs"))
 	}
 	return strings.Join(lines, "\n")
 }
