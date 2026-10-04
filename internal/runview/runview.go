@@ -12,6 +12,7 @@ import (
 
 	"github.com/EvilNick2/gh-argus/internal/badge"
 	"github.com/EvilNick2/gh-argus/internal/runs"
+	"github.com/EvilNick2/gh-argus/internal/timefmt"
 	"github.com/EvilNick2/gh-argus/internal/watch"
 )
 
@@ -102,17 +103,6 @@ func (m *Model) setJobs(jobs []runs.Job) {
 	m.cursor = max(0, min(m.cursor, len(jobs)-1))
 }
 
-func duration(d time.Duration) string {
-	d = d.Round(time.Second)
-	switch {
-	case d < time.Minute:
-		return fmt.Sprintf("%ds", int(d.Seconds()))
-	case d < time.Hour:
-		return fmt.Sprintf("%dm%02ds", int(d.Minutes()), int(d.Seconds())%60)
-	}
-	return fmt.Sprintf("%dh%02dm", int(d.Hours()), int(d.Minutes())%60)
-}
-
 // elapsed is how long something ran, or has been running, or "" if it has
 // not started.
 func (m Model) elapsed(start, end time.Time) string {
@@ -122,7 +112,7 @@ func (m Model) elapsed(start, end time.Time) string {
 	if end.IsZero() {
 		end = m.now()
 	}
-	return duration(end.Sub(start))
+	return timefmt.Duration(end.Sub(start))
 }
 
 var (

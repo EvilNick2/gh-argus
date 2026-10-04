@@ -12,6 +12,7 @@ import (
 
 	"github.com/EvilNick2/gh-argus/internal/badge"
 	"github.com/EvilNick2/gh-argus/internal/runs"
+	"github.com/EvilNick2/gh-argus/internal/timefmt"
 	"github.com/EvilNick2/gh-argus/internal/watch"
 )
 
@@ -207,18 +208,6 @@ func repoBadge(st *repoState) string {
 	return ""
 }
 
-func age(d time.Duration) string {
-	switch {
-	case d < time.Minute:
-		return fmt.Sprintf("%ds", int(d.Seconds()))
-	case d < time.Hour:
-		return fmt.Sprintf("%dm", int(d.Minutes()))
-	case d < 48*time.Hour:
-		return fmt.Sprintf("%dh", int(d.Hours()))
-	}
-	return fmt.Sprintf("%dd", int(d.Hours()/24))
-}
-
 func truncate(s string, n int) string {
 	r := []rune(s)
 	if n <= 0 {
@@ -290,7 +279,7 @@ func (m Model) View() string {
 	end := min(len(st.runs), m.runOffset+m.rows())
 	for i := m.runOffset; i < end; i++ {
 		r := st.runs[i]
-		tail := "  " + r.HeadBranch + "  " + fmt.Sprintf("%3s", age(m.now().Sub(r.CreatedAt)))
+		tail := "  " + r.HeadBranch + "  " + fmt.Sprintf("%3s", timefmt.Age(m.now().Sub(r.CreatedAt)))
 		title := fmt.Sprintf("#%d %s", r.RunNumber, r.Name)
 		if st.fresh[r.ID] {
 			title = "* " + title

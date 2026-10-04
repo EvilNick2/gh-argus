@@ -166,22 +166,6 @@ func TestCursorKeptOnJobByIDWhenJobsReorder(t *testing.T) {
 	}
 }
 
-func TestDuration(t *testing.T) {
-	cases := []struct {
-		d    time.Duration
-		want string
-	}{
-		{4 * time.Second, "4s"},
-		{62 * time.Second, "1m02s"},
-		{63 * time.Minute, "1h03m"},
-	}
-	for _, c := range cases {
-		if got := duration(c.d); got != c.want {
-			t.Errorf("duration(%v) = %q, want %q", c.d, got, c.want)
-		}
-	}
-}
-
 func TestScrollsToKeepCursorJobAndStepsVisible(t *testing.T) {
 	var many []runs.Job
 	for i := range 20 {
