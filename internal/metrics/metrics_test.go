@@ -81,27 +81,27 @@ func TestMedianDurationAndQueue(t *testing.T) {
 
 func TestTrendComparesNewerHalfToOlderHalf(t *testing.T) {
 	// Older runs take 10s, newer runs 15s: 50% slower.
-	total, _ := Compute(newestFirst(
+	_, per := Compute(newestFirst(
 		run(1, "ci", 1, "success", 10, 0),
 		run(1, "ci", 2, "success", 10, 0),
 		run(1, "ci", 3, "success", 15, 0),
 		run(1, "ci", 4, "success", 15, 0),
 	))
 
-	if math.Abs(total.Trend-0.5) > 1e-9 {
-		t.Errorf("Trend %v, want 0.5", total.Trend)
+	if math.Abs(per[0].Trend-0.5) > 1e-9 {
+		t.Errorf("Trend %v, want 0.5", per[0].Trend)
 	}
 }
 
 func TestTrendNeedsFourRuns(t *testing.T) {
-	total, _ := Compute(newestFirst(
+	_, per := Compute(newestFirst(
 		run(1, "ci", 1, "success", 10, 0),
 		run(1, "ci", 2, "success", 20, 0),
 		run(1, "ci", 3, "success", 30, 0),
 	))
 
-	if !math.IsNaN(total.Trend) {
-		t.Errorf("Trend %v from 3 runs, want NaN", total.Trend)
+	if !math.IsNaN(per[0].Trend) {
+		t.Errorf("Trend %v from 3 runs, want NaN", per[0].Trend)
 	}
 }
 
@@ -151,5 +151,29 @@ func TestHistoryKeepsLast20(t *testing.T) {
 	total, _ := Compute(newestFirst(rs...))
 	if len(total.History) != 20 || total.History[19] != "fail" || total.History[14] != "pass" {
 		t.Errorf("history %v", total.History)
+	}
+}
+
+func TestRepoTotalHasNoTrend(t *testing.T) {
+	// Each workflow is steady, but the newer half is mostly the fast one, so a
+	// pooled trend would report a speed-up that never happened.
+	total, per := Compute(newestFirst(
+		run(1, "fast", 1, "success", 10, 0),
+		run(1, "fast", 2, "success", 10, 0),
+		run(2, "slow", 3, "success", 100, 0),
+		run(2, "slow", 4, "success", 100, 0),
+		run(1, "fast", 5, "success", 10, 0),
+		run(2, "slow", 6, "success", 100, 0),
+		run(1, "fast", 7, "success", 10, 0),
+		run(2, "slow", 8, "success", 100, 0),
+	))
+
+	if !math.IsNaN(total.Trend) {
+		t.Errorf("total Trend %v, want NaN", total.Trend)
+	}
+	for _, s := range per {
+		if s.Trend != 0 {
+			t.Errorf("%s Trend %v, want 0 for a steady workflow", s.Name, s.Trend)
+		}
 	}
 }

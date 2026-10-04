@@ -30,7 +30,9 @@ type Stat struct {
 	// run sampled, so it is a detail rather than a headline.
 	QueueMedian time.Duration
 	// Trend is the median duration of the newer half of runs relative to the
-	// older half, so 0.5 is 50% slower. NaN with fewer than 4 durations.
+	// older half, so 0.5 is 50% slower. NaN with fewer than 4 durations, and
+	// always NaN for a repo total, where it would track which workflows ran
+	// lately rather than whether any got slower.
 	Trend   float64
 	History []string // badge words, oldest to newest
 	Last    time.Time
@@ -51,6 +53,7 @@ func (s Stat) SuccessRate() (float64, bool) {
 // their latest run, newest first.
 func Compute(rs []runs.Run) (Stat, []Stat) {
 	total := summarise(rs)
+	total.Trend = math.NaN()
 
 	byID := map[int64][]runs.Run{}
 	var order []int64
