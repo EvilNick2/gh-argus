@@ -744,13 +744,9 @@ func TestEnterRefusesWithReason(t *testing.T) {
 	dynamic := workflows.Workflow{ID: 2, Name: "pages-build-deployment", Path: "dynamic/pages/pages-build-deployment", State: "active"}
 	off := workflows.Workflow{ID: 3, Name: "Nightly", Path: ".github/workflows/n.yml", State: "disabled_manually"}
 	push := workflows.Workflow{ID: 4, Name: "Push only", Path: ".github/workflows/p.yml", State: "active"}
-	needy := workflows.Workflow{ID: 5, Name: "Needs input", Path: ".github/workflows/i.yml", State: "active"}
 	f := &fakeWatch{
-		wfs: map[string][]workflows.Workflow{"o/a": {dynamic, off, push, needy}},
-		specs: map[int64]workflows.DispatchSpec{
-			4: {Dispatchable: false},
-			5: {Dispatchable: true, Inputs: []workflows.Input{{Name: "version", Required: true}}},
-		},
+		wfs:   map[string][]workflows.Workflow{"o/a": {dynamic, off, push}},
+		specs: map[int64]workflows.DispatchSpec{4: {Dispatchable: false}},
 	}
 	m := onWorkflowsTab(t, f)
 
@@ -758,7 +754,6 @@ func TestEnterRefusesWithReason(t *testing.T) {
 		"pages-build-deployment is dynamic and cannot be dispatched",
 		"Nightly is disabled, enable it first",
 		"Push only has no workflow_dispatch trigger",
-		"Needs input needs inputs, which argus cannot fill in yet",
 	}
 	for i, w := range want {
 		if i > 0 {
@@ -770,6 +765,87 @@ func TestEnterRefusesWithReason(t *testing.T) {
 		if v := view(m); !strings.Contains(v, w) || strings.Contains(v, "y/n") {
 			t.Errorf("row %d: want %q without a prompt in:\n%s", i, w, v)
 		}
+	}
+	if len(f.dispatches) != 0 {
+		t.Errorf("dispatched %v", f.dispatches)
+	}
+}
+
+var needyWF = workflows.Workflow{ID: 5, Name: "Release", Path: ".github/workflows/release.yml", State: "active"}
+
+// openForm presses key on the only workflow and runs the dispatch check.
+func openForm(t *testing.T, f *fakeWatch, k tea.Msg) Model {
+	t.Helper()
+	m := onWorkflowsTab(t, f)
+	m, cmd := step(m, k)
+	return runAll(m, cmd)
+}
+
+func TestRequiredInputOpensFormAndSubmitDispatches(t *testing.T) {
+	f := &fakeWatch{
+		wfs:   map[string][]workflows.Workflow{"o/a": {needyWF}},
+		specs: map[int64]workflows.DispatchSpec{5: {Dispatchable: true, Inputs: []workflows.Input{{Name: "version", Type: "string", Required: true}}}},
+	}
+	m := openForm(t, f, tea.KeyPressMsg{Code: tea.KeyEnter})
+
+	if v := view(m); !strings.Contains(v, "run Release on main") || !strings.Contains(v, "version*") {
+		t.Fatalf("form not shown:\n%s", v)
+	}
+	for _, r := range "1.2.q" {
+		m, _ = step(m, keyMsg(string(r)))
+	}
+	if len(f.dispatches) != 0 {
+		t.Fatal("typing q in the form did something other than type")
+	}
+	m, cmd := step(m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = runAll(m, cmd)
+	if len(f.dispatches) != 1 || f.dispatches[0] != "o/a/5@main map[version:1.2.q]" {
+		t.Errorf("dispatches %v", f.dispatches)
+	}
+	v := view(m)
+	if !strings.Contains(v, "dispatched Release on main") || !strings.Contains(v, "2 Workflows") {
+		t.Errorf("not back on the tab with a confirmation:\n%s", v)
+	}
+}
+
+func TestIOpensFormForDefaultedInputs(t *testing.T) {
+	f := &fakeWatch{
+		wfs:   map[string][]workflows.Workflow{"o/a": {needyWF}},
+		specs: map[int64]workflows.DispatchSpec{5: {Dispatchable: true, Inputs: []workflows.Input{{Name: "force", Type: "boolean", Default: "false"}}}},
+	}
+	m := openForm(t, f, keyMsg("i"))
+
+	m, _ = step(m, keyMsg("space"))
+	m, cmd := step(m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	runAll(m, cmd)
+	if len(f.dispatches) != 1 || f.dispatches[0] != "o/a/5@main map[force:true]" {
+		t.Errorf("dispatches %v", f.dispatches)
+	}
+}
+
+func TestEnterWithOnlyDefaultedInputsStillPrompts(t *testing.T) {
+	f := &fakeWatch{
+		wfs:   map[string][]workflows.Workflow{"o/a": {needyWF}},
+		specs: map[int64]workflows.DispatchSpec{5: {Dispatchable: true, Inputs: []workflows.Input{{Name: "force", Type: "boolean", Default: "false"}}}},
+	}
+	m := openForm(t, f, tea.KeyPressMsg{Code: tea.KeyEnter})
+
+	if v := view(m); !strings.Contains(v, "run Release on main? y/n") {
+		t.Errorf("view:\n%s", v)
+	}
+}
+
+func TestEscClosesFormWithoutDispatching(t *testing.T) {
+	f := &fakeWatch{
+		wfs:   map[string][]workflows.Workflow{"o/a": {needyWF}},
+		specs: map[int64]workflows.DispatchSpec{5: {Dispatchable: true, Inputs: []workflows.Input{{Name: "version", Type: "string", Required: true}}}},
+	}
+	m := openForm(t, f, tea.KeyPressMsg{Code: tea.KeyEnter})
+
+	m, cmd := step(m, tea.KeyPressMsg{Code: tea.KeyEscape})
+	m = runAll(m, cmd)
+	if v := view(m); !strings.Contains(v, "2 Workflows") || strings.Contains(v, "version*") {
+		t.Errorf("form not closed:\n%s", v)
 	}
 	if len(f.dispatches) != 0 {
 		t.Errorf("dispatched %v", f.dispatches)

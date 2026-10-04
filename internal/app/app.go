@@ -12,6 +12,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/EvilNick2/gh-argus/internal/actions"
+	"github.com/EvilNick2/gh-argus/internal/dispatchform"
 	"github.com/EvilNick2/gh-argus/internal/joblog"
 	"github.com/EvilNick2/gh-argus/internal/logview"
 	"github.com/EvilNick2/gh-argus/internal/picker"
@@ -55,6 +56,7 @@ const (
 	screenTabs
 	screenRun
 	screenLog
+	screenForm
 )
 
 var tabs = []struct {
@@ -101,6 +103,7 @@ type wfLoadedMsg struct {
 // specMsg carries what a workflow file says about dispatch.
 type specMsg struct {
 	gen  int
+	edit bool // the user asked to edit inputs
 	repo string
 	wf   workflows.Workflow
 	ref  string
@@ -147,10 +150,15 @@ type Model struct {
 	runEvents <-chan watch.RunEvent
 	runCancel context.CancelFunc
 
-	log    logview.Model
-	logGen int
-	logJob runs.Job
-	logRep string
+	log logview.Model
+
+	form     dispatchform.Model
+	formRepo string
+	formWF   workflows.Workflow
+	formRef  string
+	logGen   int
+	logJob   runs.Job
+	logRep   string
 
 	confirm  *pending
 	flash    string
@@ -294,6 +302,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.wfs = m.wfs.SetSize(m.width, m.bodyHeight())
 		m.run = m.run.SetSize(m.width, m.runHeight())
 		m.log = m.log.SetSize(m.width, m.runHeight())
+		m.form = m.form.SetSize(m.width, m.runHeight())
 		return m.updatePicker(msg)
 
 	case eventMsg:
@@ -361,6 +370,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case dispatchform.SubmitMsg:
+		m.screen = screenTabs
+		dispatch, repo, wf, ref, inputs := m.deps.Dispatch, m.formRepo, m.formWF, m.formRef, msg.Inputs
+		p := pending{
+			success: fmt.Sprintf("dispatched %s on %s", wf.Name, ref),
+			failure: fmt.Sprintf("dispatch %s", wf.Name),
+		}
+		return m, func() tea.Msg {
+			return actionDoneMsg{pending: p, err: dispatch(context.Background(), repo, wf.ID, ref, inputs)}
+		}
+
+	case dispatchform.CancelMsg:
+		m.screen = screenTabs
+		return m, nil
+
 	case specMsg:
 		if msg.gen != m.gen {
 			return m, nil
@@ -387,8 +411,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if k := msg.String(); (k == "e" || k == "d") && m.screen == screenTabs && m.tab == 1 {
 			return m.askWorkflow(k == "e"), nil
 		}
-		if msg.String() == "enter" && m.screen == screenTabs && m.tab == 1 {
-			return m.checkDispatch()
+		if k := msg.String(); (k == "enter" || k == "i") && m.screen == screenTabs && m.tab == 1 {
+			return m.checkDispatch(k == "i")
 		}
 		switch m.screen {
 		case screenPicker:
@@ -399,6 +423,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			var cmd tea.Cmd
 			m.run, cmd = m.run.Update(msg)
+			return m, cmd
+		case screenForm:
+			var cmd tea.Cmd
+			m.form, cmd = m.form.Update(msg)
 			return m, cmd
 		case screenLog:
 			if msg.String() == "q" && !m.log.Searching() {
@@ -479,8 +507,9 @@ func (m Model) askWorkflow(enable bool) Model {
 }
 
 // checkDispatch refuses dynamic and disabled workflows, otherwise fetches
-// what the workflow file says about dispatch.
-func (m Model) checkDispatch() (tea.Model, tea.Cmd) {
+// what the workflow file says about dispatch. With edit set, the inputs form
+// opens even when every input has a default.
+func (m Model) checkDispatch(edit bool) (tea.Model, tea.Cmd) {
 	repo, wf, ok := m.wfs.Current()
 	switch {
 	case !ok:
@@ -496,7 +525,7 @@ func (m Model) checkDispatch() (tea.Model, tea.Cmd) {
 	gen, get := m.gen, m.deps.DispatchSpec
 	return m, func() tea.Msg {
 		ref, spec, err := get(context.Background(), repo, wf)
-		return specMsg{gen: gen, repo: repo, wf: wf, ref: ref, spec: spec, err: err}
+		return specMsg{gen: gen, edit: edit, repo: repo, wf: wf, ref: ref, spec: spec, err: err}
 	}
 }
 
@@ -509,8 +538,11 @@ func (m Model) offerDispatch(msg specMsg) Model {
 		m.flash, m.flashErr = fmt.Sprintf("checking %s failed: %v", name, msg.err), true
 	case !msg.spec.Dispatchable:
 		m.flash = fmt.Sprintf("%s has no workflow_dispatch trigger", name)
-	case msg.spec.NeedsInput():
-		m.flash = fmt.Sprintf("%s needs inputs, which argus cannot fill in yet", name)
+	case msg.spec.NeedsInput() || msg.edit && len(msg.spec.Inputs) > 0:
+		m.flash = ""
+		m.formRepo, m.formWF, m.formRef = msg.repo, msg.wf, msg.ref
+		m.form = dispatchform.New(msg.repo, msg.wf, msg.ref, msg.spec.Inputs).SetSize(m.width, m.runHeight())
+		m.screen = screenForm
 	default:
 		dispatch, repo, id, ref := m.deps.Dispatch, msg.repo, msg.wf.ID, msg.ref
 		m.flash = ""
@@ -589,6 +621,8 @@ func (m Model) View() tea.View {
 		return m.picker.View()
 	case screenRun:
 		return screenView(m.run.View(), m.runHeight(), m.footer("j/k job  enter log  r/R rerun  c cancel  esc back  q quit"))
+	case screenForm:
+		return screenView(m.form.View(), m.runHeight(), m.footer("tab next  space toggle  left/right choose  enter run  esc cancel"))
 	case screenLog:
 		return screenView(m.log.View(), m.runHeight(), m.footer("j/k scroll  / search  n/N match  w wrap  r reload  esc back  q quit"))
 	}
@@ -612,7 +646,7 @@ func (m Model) View() tea.View {
 	case 0:
 	case 1:
 		body = m.wfs.View()
-		help = "j/k move  enter run  e enable  d disable  1-5 tabs  p repos  q quit"
+		help = "j/k move  enter run  i inputs  e enable  d disable  1-5 tabs  p repos  q quit"
 	default:
 		t := tabs[m.tab]
 		body = dimStyle.Render(fmt.Sprintf("%s is not built yet, it lands in milestone %d.", t.name, t.milestone))
