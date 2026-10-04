@@ -44,6 +44,9 @@ type fakeWatch struct {
 	wfCalls []string
 	wfs     map[string][]workflows.Workflow
 	wfSets  []string
+
+	specs      map[int64]workflows.DispatchSpec
+	dispatches []string
 }
 
 func (f *fakeWatch) deps() Deps {
@@ -78,6 +81,13 @@ func (f *fakeWatch) deps() Deps {
 		ListWorkflows: func(ctx context.Context, repo string) ([]workflows.Workflow, error) {
 			f.wfCalls = append(f.wfCalls, repo)
 			return f.wfs[repo], nil
+		},
+		DispatchSpec: func(ctx context.Context, repo string, wf workflows.Workflow) (string, workflows.DispatchSpec, error) {
+			return "main", f.specs[wf.ID], nil
+		},
+		Dispatch: func(ctx context.Context, repo string, id int64, ref string, inputs map[string]string) error {
+			f.dispatches = append(f.dispatches, fmt.Sprintf("%s/%d@%s %v", repo, id, ref, inputs))
+			return nil
 		},
 		SetWorkflow: func(ctx context.Context, repo string, id int64, enabled bool) error {
 			f.wfSets = append(f.wfSets, fmt.Sprintf("%s/%d %v", repo, id, enabled))
@@ -702,5 +712,66 @@ func TestRunKeysDoNothingOnWorkflowsTab(t *testing.T) {
 	m, _ = step(m, keyMsg("c"))
 	if v := view(m); strings.Contains(v, "y/n") || strings.Contains(v, "cannot") {
 		t.Errorf("run key acted on workflows tab:\n%s", v)
+	}
+}
+
+func TestEnterDispatchesAfterCheckingAndConfirming(t *testing.T) {
+	f := &fakeWatch{
+		wfs:   map[string][]workflows.Workflow{"o/a": {buildWF}},
+		specs: map[int64]workflows.DispatchSpec{1: {Dispatchable: true}},
+	}
+	m := onWorkflowsTab(t, f)
+
+	m, check := step(m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	if v := view(m); !strings.Contains(v, "checking Build and publish") {
+		t.Errorf("no checking message:\n%s", v)
+	}
+	m = runAll(m, check)
+	if v := view(m); !strings.Contains(v, "run Build and publish on main? y/n") {
+		t.Fatalf("no prompt:\n%s", v)
+	}
+	m, send := step(m, keyMsg("y"))
+	m = runAll(m, send)
+	if len(f.dispatches) != 1 || f.dispatches[0] != "o/a/1@main map[]" {
+		t.Errorf("dispatches %v", f.dispatches)
+	}
+	if v := view(m); !strings.Contains(v, "dispatched Build and publish on main") {
+		t.Errorf("no confirmation:\n%s", v)
+	}
+}
+
+func TestEnterRefusesWithReason(t *testing.T) {
+	dynamic := workflows.Workflow{ID: 2, Name: "pages-build-deployment", Path: "dynamic/pages/pages-build-deployment", State: "active"}
+	off := workflows.Workflow{ID: 3, Name: "Nightly", Path: ".github/workflows/n.yml", State: "disabled_manually"}
+	push := workflows.Workflow{ID: 4, Name: "Push only", Path: ".github/workflows/p.yml", State: "active"}
+	needy := workflows.Workflow{ID: 5, Name: "Needs input", Path: ".github/workflows/i.yml", State: "active"}
+	f := &fakeWatch{
+		wfs: map[string][]workflows.Workflow{"o/a": {dynamic, off, push, needy}},
+		specs: map[int64]workflows.DispatchSpec{
+			4: {Dispatchable: false},
+			5: {Dispatchable: true, Inputs: []workflows.Input{{Name: "version", Required: true}}},
+		},
+	}
+	m := onWorkflowsTab(t, f)
+
+	want := []string{
+		"pages-build-deployment is dynamic and cannot be dispatched",
+		"Nightly is disabled, enable it first",
+		"Push only has no workflow_dispatch trigger",
+		"Needs input needs inputs, which argus cannot fill in yet",
+	}
+	for i, w := range want {
+		if i > 0 {
+			m, _ = step(m, keyMsg("j"))
+		}
+		var cmd tea.Cmd
+		m, cmd = step(m, tea.KeyPressMsg{Code: tea.KeyEnter})
+		m = runAll(m, cmd)
+		if v := view(m); !strings.Contains(v, w) || strings.Contains(v, "y/n") {
+			t.Errorf("row %d: want %q without a prompt in:\n%s", i, w, v)
+		}
+	}
+	if len(f.dispatches) != 0 {
+		t.Errorf("dispatched %v", f.dispatches)
 	}
 }

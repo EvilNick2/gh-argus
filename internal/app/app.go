@@ -38,6 +38,11 @@ type Deps struct {
 	Seed func(repo string) *watch.Seed
 	// ListWorkflows fetches the workflows of a repo.
 	ListWorkflows func(ctx context.Context, repo string) ([]workflows.Workflow, error)
+	// DispatchSpec returns the ref to dispatch on, normally the default
+	// branch, and what the workflow file says about dispatch.
+	DispatchSpec func(ctx context.Context, repo string, wf workflows.Workflow) (string, workflows.DispatchSpec, error)
+	// Dispatch triggers a workflow on ref with inputs.
+	Dispatch func(ctx context.Context, repo string, id int64, ref string, inputs map[string]string) error
 	// SetWorkflow enables or disables a workflow.
 	SetWorkflow func(ctx context.Context, repo string, id int64, enabled bool) error
 	Now         func() time.Time
@@ -91,6 +96,16 @@ type logMsg struct {
 type wfLoadedMsg struct {
 	gen int
 	workflowsview.LoadedMsg
+}
+
+// specMsg carries what a workflow file says about dispatch.
+type specMsg struct {
+	gen  int
+	repo string
+	wf   workflows.Workflow
+	ref  string
+	spec workflows.DispatchSpec
+	err  error
 }
 
 // pending is a change to GitHub waiting for y/n.
@@ -346,6 +361,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case specMsg:
+		if msg.gen != m.gen {
+			return m, nil
+		}
+		return m.offerDispatch(msg), nil
+
 	case wfLoadedMsg:
 		if msg.gen == m.gen {
 			m.wfs, _ = m.wfs.Update(msg.LoadedMsg)
@@ -365,6 +386,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if k := msg.String(); (k == "e" || k == "d") && m.screen == screenTabs && m.tab == 1 {
 			return m.askWorkflow(k == "e"), nil
+		}
+		if msg.String() == "enter" && m.screen == screenTabs && m.tab == 1 {
+			return m.checkDispatch()
 		}
 		switch m.screen {
 		case screenPicker:
@@ -449,6 +473,52 @@ func (m Model) askWorkflow(enable bool) Model {
 			failure: fmt.Sprintf("%s %s", verb, wf.Name),
 			do:      func(ctx context.Context) error { return set(ctx, repo, wf.ID, enable) },
 			refresh: repo,
+		}
+	}
+	return m
+}
+
+// checkDispatch refuses dynamic and disabled workflows, otherwise fetches
+// what the workflow file says about dispatch.
+func (m Model) checkDispatch() (tea.Model, tea.Cmd) {
+	repo, wf, ok := m.wfs.Current()
+	switch {
+	case !ok:
+		return m, nil
+	case wf.Dynamic():
+		m.flash = fmt.Sprintf("%s is dynamic and cannot be dispatched", wf.Name)
+		return m, nil
+	case !wf.Enabled():
+		m.flash = fmt.Sprintf("%s is disabled, enable it first", wf.Name)
+		return m, nil
+	}
+	m.flash = fmt.Sprintf("checking %s", wf.Name)
+	gen, get := m.gen, m.deps.DispatchSpec
+	return m, func() tea.Msg {
+		ref, spec, err := get(context.Background(), repo, wf)
+		return specMsg{gen: gen, repo: repo, wf: wf, ref: ref, spec: spec, err: err}
+	}
+}
+
+// offerDispatch asks to dispatch once the workflow file has been read.
+// Inputs with defaults are left out so GitHub applies the defaults.
+func (m Model) offerDispatch(msg specMsg) Model {
+	name := msg.wf.Name
+	switch {
+	case msg.err != nil:
+		m.flash, m.flashErr = fmt.Sprintf("checking %s failed: %v", name, msg.err), true
+	case !msg.spec.Dispatchable:
+		m.flash = fmt.Sprintf("%s has no workflow_dispatch trigger", name)
+	case msg.spec.NeedsInput():
+		m.flash = fmt.Sprintf("%s needs inputs, which argus cannot fill in yet", name)
+	default:
+		dispatch, repo, id, ref := m.deps.Dispatch, msg.repo, msg.wf.ID, msg.ref
+		m.flash = ""
+		m.confirm = &pending{
+			prompt:  fmt.Sprintf("run %s on %s", name, ref),
+			success: fmt.Sprintf("dispatched %s on %s", name, ref),
+			failure: fmt.Sprintf("dispatch %s", name),
+			do:      func(ctx context.Context) error { return dispatch(ctx, repo, id, ref, nil) },
 		}
 	}
 	return m
@@ -542,7 +612,7 @@ func (m Model) View() tea.View {
 	case 0:
 	case 1:
 		body = m.wfs.View()
-		help = "j/k move  e enable  d disable  1-5 tabs  p repos  q quit"
+		help = "j/k move  enter run  e enable  d disable  1-5 tabs  p repos  q quit"
 	default:
 		t := tabs[m.tab]
 		body = dimStyle.Render(fmt.Sprintf("%s is not built yet, it lands in milestone %d.", t.name, t.milestone))

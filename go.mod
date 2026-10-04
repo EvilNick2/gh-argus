@@ -8,6 +8,7 @@ require (
 	github.com/charmbracelet/x/ansi v0.11.8
 	github.com/cli/go-gh/v2 v2.16.1
 	github.com/sahilm/fuzzy v0.1.3
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
@@ -35,5 +36,4 @@ require (
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/term v0.45.0 // indirect
 	golang.org/x/text v0.41.0 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

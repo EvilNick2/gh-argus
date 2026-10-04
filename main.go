@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -122,6 +124,31 @@ func run() error {
 				return nil, err
 			}
 			return workflows.Decode(res.Body)
+		},
+		DispatchSpec: func(ctx context.Context, repo string, wf workflows.Workflow) (string, workflows.DispatchSpec, error) {
+			res, err := w.Fetcher.Get(ctx, "/repos/"+repo)
+			if err != nil {
+				return "", workflows.DispatchSpec{}, err
+			}
+			var info struct {
+				DefaultBranch string `json:"default_branch"`
+			}
+			if err := json.Unmarshal(res.Body, &info); err != nil {
+				return "", workflows.DispatchSpec{}, err
+			}
+			res, err = w.Fetcher.Get(ctx, "/repos/"+repo+"/contents/"+wf.Path+"?ref="+url.QueryEscape(info.DefaultBranch))
+			if err != nil {
+				return "", workflows.DispatchSpec{}, err
+			}
+			src, err := workflows.DecodeContent(res.Body)
+			if err != nil {
+				return "", workflows.DispatchSpec{}, err
+			}
+			spec, err := workflows.ParseDispatch(src)
+			return info.DefaultBranch, spec, err
+		},
+		Dispatch: func(ctx context.Context, repo string, id int64, ref string, inputs map[string]string) error {
+			return actions.Dispatch(ctx, client, apiURL, repo, id, ref, inputs)
 		},
 		SetWorkflow: func(ctx context.Context, repo string, id int64, enabled bool) error {
 			return actions.SetWorkflowEnabled(ctx, client, apiURL, repo, id, enabled)
