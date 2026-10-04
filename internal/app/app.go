@@ -32,7 +32,9 @@ type Deps struct {
 	// Act sends a run action such as a rerun or cancel.
 	Act           func(ctx context.Context, repo string, id int64, k actions.Kind) error
 	SaveSelection func(repos []string) error
-	Now           func() time.Time
+	// Seed returns runs saved by an earlier session, or nil.
+	Seed func(repo string) *watch.Seed
+	Now  func() time.Time
 }
 
 type screen int
@@ -143,6 +145,13 @@ func (m *Model) start(repos []string) {
 	m.cancel = cancel
 	m.events = m.deps.Watch(ctx, repos)
 	m.runs = runsview.New(repos, m.deps.Now).SetSize(m.width, m.bodyHeight())
+	if m.deps.Seed != nil {
+		for _, r := range repos {
+			if seed := m.deps.Seed(r); seed != nil {
+				m.runs = m.runs.Seed(r, seed.Runs)
+			}
+		}
+	}
 	m.screen, m.tab = screenTabs, 0
 }
 

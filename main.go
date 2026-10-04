@@ -19,6 +19,7 @@ import (
 	"github.com/EvilNick2/gh-argus/internal/joblog"
 	"github.com/EvilNick2/gh-argus/internal/picker"
 	"github.com/EvilNick2/gh-argus/internal/repos"
+	"github.com/EvilNick2/gh-argus/internal/snapshot"
 	"github.com/EvilNick2/gh-argus/internal/store"
 	"github.com/EvilNick2/gh-argus/internal/watch"
 )
@@ -60,22 +61,39 @@ func run() error {
 		return err
 	}
 
+	snaps, err := snapshot.Load(st, time.Now)
+	if err != nil {
+		return err
+	}
+
 	w := &watch.Watcher{
 		Fetcher:   fetch.New(client, apiURL),
 		Intervals: watch.DefaultIntervals,
 	}
 	deps := app.Deps{
 		Watch: func(ctx context.Context, rs []string) <-chan watch.Event {
-			ch := make(chan watch.Event)
+			raw, out := make(chan watch.Event), make(chan watch.Event)
 			var wg sync.WaitGroup
 			for _, r := range rs {
-				wg.Go(func() { w.Watch(ctx, r, ch) })
+				wg.Go(func() { w.Watch(ctx, r, snaps.Seed(r), raw) })
 			}
 			go func() {
 				wg.Wait()
-				close(ch)
+				close(raw)
 			}()
-			return ch
+			// Record each event for the next session on its way to the app.
+			// Once ctx is done the app has stopped reading, so drain instead.
+			go func() {
+				for ev := range raw {
+					snaps.Record(ev)
+					select {
+					case out <- ev:
+					case <-ctx.Done():
+					}
+				}
+				close(out)
+			}()
+			return out
 		},
 		WatchRun: func(ctx context.Context, repo string, id int64) <-chan watch.RunEvent {
 			ch := make(chan watch.RunEvent)
@@ -96,10 +114,30 @@ func run() error {
 			return actions.Do(ctx, client, apiURL, repo, id, k)
 		},
 		SaveSelection: func(rs []string) error { return st.Save("selection", rs) },
+		Seed:          snaps.Seed,
 		Now:           time.Now,
 	}
 
+	stopFlush := make(chan struct{})
+	go func() {
+		t := time.NewTicker(30 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-t.C:
+				// A failed write is retried on the next tick and on exit.
+				snaps.Flush()
+			case <-stopFlush:
+				return
+			}
+		}
+	}()
+
 	_, err = tea.NewProgram(app.New(deps, p, given)).Run()
+	close(stopFlush)
+	if ferr := snaps.Flush(); err == nil {
+		err = ferr
+	}
 	return err
 }
 

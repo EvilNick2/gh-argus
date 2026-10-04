@@ -231,3 +231,58 @@ func TestCurrentIsRunUnderCursor(t *testing.T) {
 		t.Error("Current() ok with no runs")
 	}
 }
+
+func TestSeedShowsCachedRunsUntilFirstPoll(t *testing.T) {
+	m := New([]string{"EvilNick2/dotfiles"}, func() time.Time { return now }).SetSize(100, 20)
+
+	m = m.Seed("EvilNick2/dotfiles", dotfilesRuns)
+	v := ansi.Strip(m.View())
+	if !strings.Contains(v, "#16 Manifest check") || !strings.Contains(v, "cached, refreshing") {
+		t.Errorf("seeded view:\n%s", v)
+	}
+	m, _ = send(m, watch.Event{Repo: "EvilNick2/dotfiles", Initial: true, Runs: dotfilesRuns})
+	if v := ansi.Strip(m.View()); strings.Contains(v, "cached") {
+		t.Errorf("still marked cached after first poll:\n%s", v)
+	}
+}
+
+func TestChangesSinceLastSessionAreMarked(t *testing.T) {
+	m := New([]string{"EvilNick2/dotfiles"}, func() time.Time { return now }).SetSize(100, 20)
+	m = m.Seed("EvilNick2/dotfiles", dotfilesRuns[1:])
+
+	m, _ = send(m, watch.Event{Repo: "EvilNick2/dotfiles", Initial: true, Runs: dotfilesRuns,
+		Changes: []runs.Change{{Run: dotfilesRuns[0]}}})
+	v := ansi.Strip(m.View())
+	if l := line(t, v, "#16 Manifest check"); !strings.Contains(l, "* #16") {
+		t.Errorf("new run row %q, want * marker", l)
+	}
+	if l := line(t, v, "#15 Manifest check"); strings.Contains(l, "*") {
+		t.Errorf("unchanged run row %q marked", l)
+	}
+}
+
+func TestLiveChangesAreNotMarked(t *testing.T) {
+	m := newModel(t)
+	done := dotfilesRuns[0]
+	done.Status, done.Conclusion = "completed", "success"
+
+	m, _ = send(m, watch.Event{Repo: "EvilNick2/dotfiles", Runs: []runs.Run{done, dotfilesRuns[1]},
+		Changes: []runs.Change{{Prev: &dotfilesRuns[0], Run: done}}})
+	if l := line(t, ansi.Strip(m.View()), "#16 Manifest check"); strings.Contains(l, "*") {
+		t.Errorf("live change marked: %q", l)
+	}
+}
+
+func TestSidebarMarksUnviewedRepoWithChangesUntilVisited(t *testing.T) {
+	m := newModel(t)
+
+	m, _ = send(m, watch.Event{Repo: "EvilNick2/orpheus", Initial: true, Runs: orpheusRuns,
+		Changes: []runs.Change{{Run: orpheusRuns[0]}}})
+	if l := line(t, ansi.Strip(m.View()), "orpheus"); !strings.Contains(l, "orpheus*") {
+		t.Errorf("sidebar line %q, want orpheus*", l)
+	}
+	m, _ = send(m, key("j"))
+	if v := ansi.Strip(m.View()); strings.Contains(v, "orpheus*") {
+		t.Errorf("marker kept after visiting:\n%s", v)
+	}
+}

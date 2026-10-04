@@ -37,6 +37,8 @@ type fakeWatch struct {
 
 	acts   []string
 	actErr error
+
+	seeds map[string]*watch.Seed
 }
 
 func (f *fakeWatch) deps() Deps {
@@ -67,7 +69,8 @@ func (f *fakeWatch) deps() Deps {
 			f.acts = append(f.acts, fmt.Sprintf("%s/%d %v", repo, id, k))
 			return f.actErr
 		},
-		Now: func() time.Time { return time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC) },
+		Seed: func(repo string) *watch.Seed { return f.seeds[repo] },
+		Now:  func() time.Time { return time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC) },
 	}
 }
 
@@ -587,5 +590,17 @@ func TestRefusalPhrasing(t *testing.T) {
 	m, _ = step(m, keyMsg("r"))
 	if v := view(m); !strings.Contains(v, "cannot rerun failed jobs of #72, it succeeded") {
 		t.Errorf("view:\n%s", v)
+	}
+}
+
+func TestSavedRunsShowBeforeFirstPoll(t *testing.T) {
+	f := &fakeWatch{seeds: map[string]*watch.Seed{
+		"o/r": {ETag: `"e"`, Runs: []runs.Run{{ID: 1, RunNumber: 41, Name: "release", Status: "completed", Conclusion: "success"}}},
+	}}
+	m := sized(New(f.deps(), newPicker(), []string{"o/r"}))
+
+	v := view(m)
+	if !strings.Contains(v, "#41 release") || !strings.Contains(v, "cached, refreshing") {
+		t.Errorf("saved runs not shown at start:\n%s", v)
 	}
 }

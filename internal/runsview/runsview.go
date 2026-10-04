@@ -25,6 +25,13 @@ type repoState struct {
 	runs []runs.Run
 	err  error
 	seen bool
+	// cached is set while runs come from a saved snapshot, before the first
+	// poll of this session.
+	cached bool
+	// fresh holds runs that changed since the last session.
+	fresh map[int64]bool
+	// unseen marks a repo with fresh runs that has not been highlighted.
+	unseen bool
 }
 
 type Model struct {
@@ -59,6 +66,15 @@ func (m Model) current() *repoState {
 		return &repoState{}
 	}
 	return m.state[m.repos[m.repoIdx]]
+}
+
+// Seed shows runs saved by an earlier session until the first poll.
+func (m Model) Seed(repo string, rs []runs.Run) Model {
+	if st, ok := m.state[repo]; ok {
+		st.runs, st.seen, st.cached = rs, true, true
+		m.clamp()
+	}
+	return m
 }
 
 // Current returns the run under the runs cursor, which actions apply to.
@@ -108,8 +124,19 @@ func (m *Model) apply(ev watch.Event) {
 		keep = st.runs[m.runIdx].ID
 	}
 	st.err = ev.Err
+	if ev.Err == nil {
+		st.cached = false
+	}
 	if ev.Runs != nil {
 		st.runs, st.seen = ev.Runs, true
+	}
+	// Changes on the first poll happened while argus was closed.
+	if ev.Initial && len(ev.Changes) > 0 {
+		st.fresh = map[int64]bool{}
+		for _, c := range ev.Changes {
+			st.fresh[c.Run.ID] = true
+		}
+		st.unseen = ev.Repo != m.repos[m.repoIdx]
 	}
 	if keep >= 0 {
 		for i, r := range st.runs {
@@ -155,6 +182,7 @@ func (m *Model) move(d int) {
 		next := max(0, min(m.repoIdx+d, len(m.repos)-1))
 		if next != m.repoIdx {
 			m.repoIdx, m.runIdx, m.runOffset = next, 0, 0
+			m.state[m.repos[next]].unseen = false
 		}
 	}
 	m.clamp()
@@ -224,7 +252,11 @@ func (m Model) View() string {
 
 	var side []string
 	for i, r := range m.repos {
-		name := pad(truncate(shortName(r), nameW), nameW)
+		label := shortName(r)
+		if m.state[r].unseen {
+			label += "*"
+		}
+		name := pad(truncate(label, nameW), nameW)
 		if i == m.repoIdx {
 			if m.focusRuns {
 				name = boldStyle.Render(name)
@@ -241,9 +273,12 @@ func (m Model) View() string {
 		pane = append(pane, boldStyle.Render(m.repos[m.repoIdx]))
 	}
 	st := m.current()
-	if st.err != nil {
+	switch {
+	case st.err != nil:
 		pane = append(pane, errStyle.Render(truncate(st.err.Error(), paneW)))
-	} else {
+	case st.cached:
+		pane = append(pane, dimStyle.Render("cached, refreshing"))
+	default:
 		pane = append(pane, "")
 	}
 	switch {
@@ -257,6 +292,9 @@ func (m Model) View() string {
 		r := st.runs[i]
 		tail := "  " + r.HeadBranch + "  " + fmt.Sprintf("%3s", age(m.now().Sub(r.CreatedAt)))
 		title := fmt.Sprintf("#%d %s", r.RunNumber, r.Name)
+		if st.fresh[r.ID] {
+			title = "* " + title
+		}
 		title = pad(truncate(title, paneW-5-len([]rune(tail))), paneW-5-len([]rune(tail)))
 		if m.focusRuns && i == m.runIdx {
 			title = cursorStyle.Render(title)
