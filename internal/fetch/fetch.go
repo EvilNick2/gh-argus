@@ -1,0 +1,97 @@
+// Package fetch makes conditional GET requests against the GitHub REST API.
+//
+// It needs a plain *http.Client such as api.DefaultHTTPClient() from go-gh.
+// go-gh's RESTClient treats a 304 as an error and drops the response headers.
+package fetch
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"net/http"
+	"strconv"
+	"strings"
+	"sync"
+)
+
+type Fetcher struct {
+	client  *http.Client
+	baseURL string
+
+	mu    sync.Mutex
+	cache map[string]entry
+}
+
+type entry struct {
+	etag string
+	body []byte
+}
+
+type Result struct {
+	Body []byte
+	// NotModified reports a 304, in which case Body is the cached copy.
+	NotModified bool
+	// RateRemaining is X-RateLimit-Remaining, or -1 when absent.
+	RateRemaining int
+}
+
+type StatusError struct {
+	StatusCode int
+	Path       string
+	Body       string
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("GET %s: %d %s", e.Path, e.StatusCode, strings.TrimSpace(e.Body))
+}
+
+func New(client *http.Client, baseURL string) *Fetcher {
+	return &Fetcher{
+		client:  client,
+		baseURL: strings.TrimSuffix(baseURL, "/"),
+		cache:   map[string]entry{},
+	}
+}
+
+func (f *Fetcher) Get(ctx context.Context, path string) (Result, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, f.baseURL+path, nil)
+	if err != nil {
+		return Result{}, err
+	}
+	f.mu.Lock()
+	cached, ok := f.cache[path]
+	f.mu.Unlock()
+	if ok {
+		req.Header.Set("If-None-Match", cached.etag)
+	}
+
+	resp, err := f.client.Do(req)
+	if err != nil {
+		return Result{}, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return Result{}, err
+	}
+
+	res := Result{RateRemaining: -1}
+	if v, err := strconv.Atoi(resp.Header.Get("X-RateLimit-Remaining")); err == nil {
+		res.RateRemaining = v
+	}
+
+	switch {
+	case resp.StatusCode == http.StatusNotModified && ok:
+		res.Body, res.NotModified = cached.body, true
+	case resp.StatusCode >= 200 && resp.StatusCode <= 299:
+		res.Body = body
+		if etag := resp.Header.Get("ETag"); etag != "" {
+			f.mu.Lock()
+			f.cache[path] = entry{etag: etag, body: body}
+			f.mu.Unlock()
+		}
+	default:
+		return Result{}, &StatusError{StatusCode: resp.StatusCode, Path: path, Body: string(body)}
+	}
+	return res, nil
+}
