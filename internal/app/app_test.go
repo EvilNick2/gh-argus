@@ -47,6 +47,9 @@ type fakeWatch struct {
 
 	specs      map[int64]workflows.DispatchSpec
 	dispatches []string
+
+	recentCalls []string
+	recent      map[string][]runs.Run
 }
 
 func (f *fakeWatch) deps() Deps {
@@ -84,6 +87,10 @@ func (f *fakeWatch) deps() Deps {
 		},
 		DispatchSpec: func(ctx context.Context, repo string, wf workflows.Workflow) (string, workflows.DispatchSpec, error) {
 			return "main", f.specs[wf.ID], nil
+		},
+		RecentRuns: func(ctx context.Context, repo string) ([]runs.Run, error) {
+			f.recentCalls = append(f.recentCalls, repo)
+			return f.recent[repo], nil
 		},
 		Branches: func(ctx context.Context, repo string) ([]string, error) {
 			return []string{"dev", "main"}, nil
@@ -873,5 +880,26 @@ func TestIPicksBranchForWorkflowWithoutInputs(t *testing.T) {
 	}
 	if v := view(m); !strings.Contains(v, "dispatched Build and publish on dev") {
 		t.Errorf("view:\n%s", v)
+	}
+}
+
+func TestMetricsTabLoadsRecentRunsPerRepo(t *testing.T) {
+	r := runs.Run{ID: 1, WorkflowID: 1, Name: "ci", Status: "completed", Conclusion: "success", RunAttempt: 1,
+		CreatedAt: time.Date(2026, 10, 4, 11, 0, 0, 0, time.UTC), RunStartedAt: time.Date(2026, 10, 4, 11, 0, 0, 0, time.UTC),
+		UpdatedAt: time.Date(2026, 10, 4, 11, 0, 9, 0, time.UTC)}
+	f := &fakeWatch{recent: map[string][]runs.Run{"o/a": {r}}}
+	m := sized(New(f.deps(), newPicker(), []string{"o/a", "o/b"}))
+
+	m, cmd := step(m, keyMsg("3"))
+	m = runAll(m, cmd)
+	if !slices.Equal(f.recentCalls, []string{"o/a", "o/b"}) {
+		t.Errorf("recent run loads %v", f.recentCalls)
+	}
+	v := view(m)
+	if !strings.Contains(v, "success") || !strings.Contains(v, "100%") || !strings.Contains(v, "9s") {
+		t.Errorf("metrics not shown:\n%s", v)
+	}
+	if strings.Contains(v, "not built yet") {
+		t.Errorf("placeholder shown:\n%s", v)
 	}
 }

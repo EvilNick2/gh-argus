@@ -21,6 +21,7 @@ import (
 	"github.com/EvilNick2/gh-argus/internal/joblog"
 	"github.com/EvilNick2/gh-argus/internal/picker"
 	"github.com/EvilNick2/gh-argus/internal/repos"
+	"github.com/EvilNick2/gh-argus/internal/runs"
 	"github.com/EvilNick2/gh-argus/internal/snapshot"
 	"github.com/EvilNick2/gh-argus/internal/store"
 	"github.com/EvilNick2/gh-argus/internal/watch"
@@ -146,6 +147,13 @@ func run() error {
 			}
 			spec, err := workflows.ParseDispatch(src)
 			return info.DefaultBranch, spec, err
+		},
+		RecentRuns: func(ctx context.Context, repo string) ([]runs.Run, error) {
+			res, err := w.Fetcher.Get(ctx, "/repos/"+repo+"/actions/runs?per_page=100")
+			if err != nil {
+				return nil, err
+			}
+			return runs.Decode(res.Body)
 		},
 		Branches: func(ctx context.Context, repo string) ([]string, error) {
 			res, err := w.Fetcher.Get(ctx, "/repos/"+repo+"/branches?per_page=100")

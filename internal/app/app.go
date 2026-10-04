@@ -15,6 +15,7 @@ import (
 	"github.com/EvilNick2/gh-argus/internal/dispatchform"
 	"github.com/EvilNick2/gh-argus/internal/joblog"
 	"github.com/EvilNick2/gh-argus/internal/logview"
+	"github.com/EvilNick2/gh-argus/internal/metricsview"
 	"github.com/EvilNick2/gh-argus/internal/picker"
 	"github.com/EvilNick2/gh-argus/internal/runs"
 	"github.com/EvilNick2/gh-argus/internal/runsview"
@@ -42,6 +43,8 @@ type Deps struct {
 	// DispatchSpec returns the ref to dispatch on, normally the default
 	// branch, and what the workflow file says about dispatch.
 	DispatchSpec func(ctx context.Context, repo string, wf workflows.Workflow) (string, workflows.DispatchSpec, error)
+	// RecentRuns fetches a repo's recent runs for the Metrics tab.
+	RecentRuns func(ctx context.Context, repo string) ([]runs.Run, error)
 	// Branches lists a repo's branches for the dispatch form.
 	Branches func(ctx context.Context, repo string) ([]string, error)
 	// Dispatch triggers a workflow on ref with inputs.
@@ -102,6 +105,13 @@ type wfLoadedMsg struct {
 	workflowsview.LoadedMsg
 }
 
+// metLoadedMsg carries one repo's recent runs for the Metrics tab, tagged
+// like wfLoadedMsg.
+type metLoadedMsg struct {
+	gen int
+	metricsview.LoadedMsg
+}
+
 // specMsg carries what a workflow file says about dispatch.
 type specMsg struct {
 	gen      int
@@ -141,6 +151,7 @@ type Model struct {
 	picker picker.Model
 	runs   runsview.Model
 	wfs    workflowsview.Model
+	mets   metricsview.Model
 	repos  []string
 	tab    int
 
@@ -195,8 +206,23 @@ func (m *Model) start(repos []string) {
 		}
 	}
 	m.wfs = workflowsview.New(repos).SetSize(m.width, m.bodyHeight())
+	m.mets = metricsview.New(repos, m.deps.Now).SetSize(m.width, m.bodyHeight())
 	m.repos = repos
 	m.screen, m.tab = screenTabs, 0
+}
+
+// loadMetrics fetches each watched repo's recent runs. The fetcher's ETags
+// make reopening the tab free while nothing has changed.
+func (m Model) loadMetrics() tea.Cmd {
+	var cmds []tea.Cmd
+	for _, r := range m.repos {
+		gen, recent := m.gen, m.deps.RecentRuns
+		cmds = append(cmds, func() tea.Msg {
+			rs, err := recent(context.Background(), r)
+			return metLoadedMsg{gen: gen, LoadedMsg: metricsview.LoadedMsg{Repo: r, Runs: rs, Err: err}}
+		})
+	}
+	return tea.Batch(cmds...)
 }
 
 // loadWorkflows fetches the workflows of repos. The fetcher's ETags make a
@@ -302,6 +328,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		m.runs = m.runs.SetSize(m.width, m.bodyHeight())
 		m.wfs = m.wfs.SetSize(m.width, m.bodyHeight())
+		m.mets = m.mets.SetSize(m.width, m.bodyHeight())
 		m.run = m.run.SetSize(m.width, m.runHeight())
 		m.log = m.log.SetSize(m.width, m.runHeight())
 		m.form = m.form.SetSize(m.width, m.runHeight())
@@ -392,6 +419,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m.offerDispatch(msg), nil
+
+	case metLoadedMsg:
+		if msg.gen == m.gen {
+			m.mets, _ = m.mets.Update(msg.LoadedMsg)
+		}
+		return m, nil
 
 	case wfLoadedMsg:
 		if msg.gen == m.gen {
@@ -599,8 +632,11 @@ func (m Model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "1", "2", "3", "4", "5":
 		m.tab = int(k[0] - '1')
-		if m.tab == 1 {
+		switch m.tab {
+		case 1:
 			return m, m.loadWorkflows(m.repos...)
+		case 2:
+			return m, m.loadMetrics()
 		}
 		return m, nil
 	}
@@ -610,6 +646,8 @@ func (m Model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.runs, cmd = m.runs.Update(msg)
 	case 1:
 		m.wfs, cmd = m.wfs.Update(msg)
+	case 2:
+		m.mets, cmd = m.mets.Update(msg)
 	}
 	return m, cmd
 }
@@ -652,6 +690,9 @@ func (m Model) View() tea.View {
 	case 1:
 		body = m.wfs.View()
 		help = "j/k move  enter run  i branch and inputs  e enable  d disable  1-5 tabs  p repos  q quit"
+	case 2:
+		body = m.mets.View()
+		help = "j/k move  1-5 tabs  p repos  q quit"
 	default:
 		t := tabs[m.tab]
 		body = dimStyle.Render(fmt.Sprintf("%s is not built yet, it lands in milestone %d.", t.name, t.milestone))
