@@ -1,0 +1,247 @@
+package app
+
+import (
+	"context"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+
+	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
+
+	"github.com/EvilNick2/gh-argus/internal/picker"
+	"github.com/EvilNick2/gh-argus/internal/repos"
+	"github.com/EvilNick2/gh-argus/internal/runs"
+	"github.com/EvilNick2/gh-argus/internal/watch"
+)
+
+// fakeWatch records each Watch call and hands back a channel the test feeds.
+type fakeWatch struct {
+	calls [][]string
+	ctxs  []context.Context
+	chans []chan watch.Event
+	saved [][]string
+}
+
+func (f *fakeWatch) deps() Deps {
+	return Deps{
+		Watch: func(ctx context.Context, rs []string) <-chan watch.Event {
+			ch := make(chan watch.Event, 4)
+			f.calls = append(f.calls, rs)
+			f.ctxs = append(f.ctxs, ctx)
+			f.chans = append(f.chans, ch)
+			return ch
+		},
+		SaveSelection: func(rs []string) error {
+			f.saved = append(f.saved, rs)
+			return nil
+		},
+		Now: func() time.Time { return time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC) },
+	}
+}
+
+var sample = []repos.Repo{
+	{FullName: "EvilNick2/dotfiles", Owner: "EvilNick2", Name: "dotfiles"},
+	{FullName: "EvilNick2/orpheus", Owner: "EvilNick2", Name: "orpheus"},
+}
+
+func newPicker() picker.Model {
+	return picker.New(sample, nil, nil)
+}
+
+// step applies msg and then runs any returned command, feeding its message
+// back in, except for commands that block on the watch channel.
+func step(m Model, msg tea.Msg) (Model, tea.Cmd) {
+	next, cmd := m.Update(msg)
+	return next.(Model), cmd
+}
+
+func keyMsg(s string) tea.Msg {
+	switch s {
+	case "enter":
+		return tea.KeyPressMsg{Code: tea.KeyEnter}
+	case "space":
+		return tea.KeyPressMsg{Code: tea.KeySpace, Text: " "}
+	case "ctrl+c":
+		return tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl}
+	}
+	return tea.KeyPressMsg{Code: []rune(s)[0], Text: s}
+}
+
+func view(m Model) string {
+	return ansi.Strip(m.View().Content)
+}
+
+func sized(m Model) Model {
+	m, _ = step(m, tea.WindowSizeMsg{Width: 100, Height: 20})
+	return m
+}
+
+// confirm picks the first repo in the picker and feeds the ConfirmMsg back.
+func confirm(t *testing.T, m Model) (Model, tea.Cmd) {
+	t.Helper()
+	m, cmd := step(m, keyMsg("enter"))
+	if cmd == nil {
+		t.Fatal("enter in picker returned no command")
+	}
+	return step(m, cmd())
+}
+
+func TestStartsInPickerWithoutRepos(t *testing.T) {
+	f := &fakeWatch{}
+	m := sized(New(f.deps(), newPicker(), nil))
+
+	if v := view(m); !strings.Contains(v, "pick repos to watch") {
+		t.Errorf("view:\n%s", v)
+	}
+	if len(f.calls) != 0 {
+		t.Errorf("watch started before picking: %v", f.calls)
+	}
+}
+
+func TestConfirmSavesSelectionStartsWatchAndShowsRuns(t *testing.T) {
+	f := &fakeWatch{}
+	m := sized(New(f.deps(), newPicker(), nil))
+
+	m, _ = confirm(t, m)
+	want := []string{"EvilNick2/dotfiles"}
+	if len(f.calls) != 1 || !slices.Equal(f.calls[0], want) {
+		t.Errorf("watch calls %v, want one with %v", f.calls, want)
+	}
+	if len(f.saved) != 1 || !slices.Equal(f.saved[0], want) {
+		t.Errorf("saved %v, want %v", f.saved, want)
+	}
+	if v := view(m); !strings.Contains(v, "Runs") || !strings.Contains(v, "waiting for first poll") {
+		t.Errorf("view after confirm:\n%s", v)
+	}
+}
+
+func TestReposGivenSkipsPickerAndWatches(t *testing.T) {
+	f := &fakeWatch{}
+	m := sized(New(f.deps(), newPicker(), []string{"o/r"}))
+
+	if len(f.calls) != 1 || !slices.Equal(f.calls[0], []string{"o/r"}) {
+		t.Errorf("watch calls %v", f.calls)
+	}
+	if len(f.saved) != 0 {
+		t.Errorf("-R repos saved as selection: %v", f.saved)
+	}
+	if v := view(m); strings.Contains(v, "pick repos") {
+		t.Errorf("picker shown despite repos given:\n%s", v)
+	}
+}
+
+func TestWatchEventsReachRunsTab(t *testing.T) {
+	f := &fakeWatch{}
+	m := New(f.deps(), newPicker(), []string{"o/r"})
+	m = sized(m)
+
+	f.chans[0] <- watch.Event{Repo: "o/r", Initial: true, Runs: []runs.Run{
+		{ID: 1, RunNumber: 7, Name: "build", Status: "completed", Conclusion: "success"},
+	}}
+	msg := m.Init()()
+	m, next := step(m, msg)
+	if v := view(m); !strings.Contains(v, "#7 build") {
+		t.Errorf("event not shown:\n%s", v)
+	}
+	if next == nil {
+		t.Error("no command to wait for the next event")
+	}
+}
+
+func TestNumberKeysSwitchTabs(t *testing.T) {
+	f := &fakeWatch{}
+	m := sized(New(f.deps(), newPicker(), []string{"o/r"}))
+
+	m, _ = step(m, keyMsg("3"))
+	if v := view(m); !strings.Contains(v, "Metrics") || strings.Contains(v, "waiting for first poll") {
+		t.Errorf("tab 3 view:\n%s", v)
+	}
+	m, _ = step(m, keyMsg("1"))
+	if v := view(m); !strings.Contains(v, "waiting for first poll") {
+		t.Errorf("back on tab 1 view:\n%s", v)
+	}
+}
+
+// repickOrpheus swaps the picker selection from dotfiles to orpheus.
+func repickOrpheus(m Model) Model {
+	for _, k := range []string{"space", "j", "space"} {
+		m, _ = step(m, keyMsg(k))
+	}
+	return m
+}
+
+func TestPReopensPickerAndStopsOldWatch(t *testing.T) {
+	f := &fakeWatch{}
+	m := sized(New(f.deps(), newPicker(), nil))
+	m, _ = confirm(t, m)
+
+	m, _ = step(m, keyMsg("p"))
+	if v := view(m); !strings.Contains(v, "pick repos to watch") {
+		t.Errorf("p did not reopen picker:\n%s", v)
+	}
+	if f.ctxs[0].Err() == nil {
+		t.Error("old watch context not cancelled")
+	}
+	m = repickOrpheus(m)
+	m, _ = confirm(t, m)
+	if len(f.calls) != 2 || !slices.Equal(f.calls[1], []string{"EvilNick2/orpheus"}) {
+		t.Errorf("second watch calls %v", f.calls)
+	}
+}
+
+func TestEventsFromOldWatchAreIgnored(t *testing.T) {
+	f := &fakeWatch{}
+	m := sized(New(f.deps(), newPicker(), nil))
+	m, waitOld := confirm(t, m)
+	m, _ = step(m, keyMsg("p"))
+	m = repickOrpheus(m)
+	m, _ = confirm(t, m)
+
+	f.chans[0] <- watch.Event{Repo: "EvilNick2/orpheus", Initial: true, Runs: []runs.Run{{ID: 1, RunNumber: 99, Name: "stale"}}}
+	m, next := step(m, waitOld())
+	if v := view(m); strings.Contains(v, "#99 stale") {
+		t.Errorf("stale event shown:\n%s", v)
+	}
+	if next != nil {
+		t.Error("kept waiting on the old watch channel")
+	}
+}
+
+func TestQuitKeys(t *testing.T) {
+	for _, k := range []string{"q", "ctrl+c"} {
+		f := &fakeWatch{}
+		m := sized(New(f.deps(), newPicker(), []string{"o/r"}))
+		_, cmd := step(m, keyMsg(k))
+		if cmd == nil {
+			t.Errorf("%s: no command", k)
+			continue
+		}
+		if _, ok := cmd().(tea.QuitMsg); !ok {
+			t.Errorf("%s: command did not quit", k)
+		}
+		if f.ctxs[0].Err() == nil {
+			t.Errorf("%s: watch context not cancelled on quit", k)
+		}
+	}
+}
+
+func TestInitRefreshesPickerEvenWhenReposGiven(t *testing.T) {
+	f := &fakeWatch{}
+	refreshed := false
+	p := newPicker().WithInit(func() tea.Msg { refreshed = true; return nil })
+	m := New(f.deps(), p, []string{"o/r"})
+	close(f.chans[0])
+
+	batch, ok := m.Init()().(tea.BatchMsg)
+	if !ok {
+		t.Fatal("Init did not batch the watch wait with the picker refresh")
+	}
+	for _, cmd := range batch {
+		cmd()
+	}
+	if !refreshed {
+		t.Error("picker refresh did not run")
+	}
+}

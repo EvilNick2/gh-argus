@@ -349,3 +349,17 @@ func TestEmptyListShowsLoadingUntilReposArrive(t *testing.T) {
 		t.Error("still loading after an empty list arrived")
 	}
 }
+
+func TestEnterSendsConfirmMsgInsteadOfQuitting(t *testing.T) {
+	m, _ := newModel(t, sample, nil, 20)
+
+	m = send(m, key("j"), key("space"))
+	_, cmd := m.Update(key("enter"))
+	if cmd == nil {
+		t.Fatal("enter returned no command")
+	}
+	msg, ok := cmd().(ConfirmMsg)
+	if !ok || !slices.Equal(msg.Repos, []string{"Bath-Impact-Lab/aXR-www"}) {
+		t.Errorf("got %#v, want ConfirmMsg with aXR-www", msg)
+	}
+}

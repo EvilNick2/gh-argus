@@ -25,6 +25,11 @@ type StatusMsg struct {
 
 // ReposMsg replaces the repo list, typically after a background refresh.
 // A nil Repos keeps the current list. Err is shown either way.
+// ConfirmMsg is sent when the user confirms, carrying the selected repos.
+type ConfirmMsg struct {
+	Repos []string
+}
+
 type ReposMsg struct {
 	Repos []repos.Repo
 	Err   error
@@ -244,7 +249,8 @@ func (m *Model) key(msg tea.KeyPressMsg) tea.Cmd {
 			m.selected[name] = true
 		}
 		m.done = true
-		return tea.Quit
+		chosen := m.Selected()
+		return func() tea.Msg { return ConfirmMsg{Repos: chosen} }
 	}
 	m.cursor = max(0, m.cursor)
 	m.scroll()
