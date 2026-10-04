@@ -19,6 +19,7 @@ import (
 	"github.com/EvilNick2/gh-argus/internal/runsview"
 	"github.com/EvilNick2/gh-argus/internal/runview"
 	"github.com/EvilNick2/gh-argus/internal/watch"
+	"github.com/EvilNick2/gh-argus/internal/workflows"
 )
 
 // fakeWatch records each Watch call and hands back a channel the test feeds.
@@ -39,6 +40,10 @@ type fakeWatch struct {
 	actErr error
 
 	seeds map[string]*watch.Seed
+
+	wfCalls []string
+	wfs     map[string][]workflows.Workflow
+	wfSets  []string
 }
 
 func (f *fakeWatch) deps() Deps {
@@ -70,7 +75,15 @@ func (f *fakeWatch) deps() Deps {
 			return f.actErr
 		},
 		Seed: func(repo string) *watch.Seed { return f.seeds[repo] },
-		Now:  func() time.Time { return time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC) },
+		ListWorkflows: func(ctx context.Context, repo string) ([]workflows.Workflow, error) {
+			f.wfCalls = append(f.wfCalls, repo)
+			return f.wfs[repo], nil
+		},
+		SetWorkflow: func(ctx context.Context, repo string, id int64, enabled bool) error {
+			f.wfSets = append(f.wfSets, fmt.Sprintf("%s/%d %v", repo, id, enabled))
+			return nil
+		},
+		Now: func() time.Time { return time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC) },
 	}
 }
 
@@ -602,5 +615,92 @@ func TestSavedRunsShowBeforeFirstPoll(t *testing.T) {
 	v := view(m)
 	if !strings.Contains(v, "#41 release") || !strings.Contains(v, "cached, refreshing") {
 		t.Errorf("saved runs not shown at start:\n%s", v)
+	}
+}
+
+// runAll runs cmd and any commands it batches, feeding each message to m.
+func runAll(m Model, cmd tea.Cmd) Model {
+	if cmd == nil {
+		return m
+	}
+	switch msg := cmd().(type) {
+	case tea.BatchMsg:
+		for _, c := range msg {
+			m = runAll(m, c)
+		}
+	case nil:
+	default:
+		var next tea.Cmd
+		m, next = step(m, msg)
+		m = runAll(m, next)
+	}
+	return m
+}
+
+func onWorkflowsTab(t *testing.T, f *fakeWatch) Model {
+	t.Helper()
+	m := sized(New(f.deps(), newPicker(), []string{"o/a", "o/b"}))
+	m, cmd := step(m, keyMsg("2"))
+	return runAll(m, cmd)
+}
+
+var buildWF = workflows.Workflow{ID: 1, Name: "Build and publish", Path: ".github/workflows/build.yml", State: "active"}
+
+func TestWorkflowsTabLoadsEachRepo(t *testing.T) {
+	f := &fakeWatch{wfs: map[string][]workflows.Workflow{"o/a": {buildWF}}}
+	m := onWorkflowsTab(t, f)
+
+	if !slices.Equal(f.wfCalls, []string{"o/a", "o/b"}) {
+		t.Errorf("workflow loads %v", f.wfCalls)
+	}
+	v := view(m)
+	if !strings.Contains(v, "Build and publish") || !strings.Contains(v, "no workflows") {
+		t.Errorf("view:\n%s", v)
+	}
+}
+
+func TestDisableWorkflowConfirmsThenReloads(t *testing.T) {
+	f := &fakeWatch{wfs: map[string][]workflows.Workflow{"o/a": {buildWF}}}
+	m := onWorkflowsTab(t, f)
+
+	m, _ = step(m, keyMsg("d"))
+	if v := view(m); !strings.Contains(v, "disable workflow Build and publish? y/n") {
+		t.Errorf("no prompt:\n%s", v)
+	}
+	m, cmd := step(m, keyMsg("y"))
+	loadsBefore := len(f.wfCalls)
+	m = runAll(m, cmd)
+	if len(f.wfSets) != 1 || f.wfSets[0] != "o/a/1 false" {
+		t.Errorf("workflow sets %v", f.wfSets)
+	}
+	if len(f.wfCalls) != loadsBefore+1 || f.wfCalls[len(f.wfCalls)-1] != "o/a" {
+		t.Errorf("o/a not reloaded after disabling: %v", f.wfCalls)
+	}
+	if v := view(m); !strings.Contains(v, "disabled Build and publish") {
+		t.Errorf("no confirmation:\n%s", v)
+	}
+}
+
+func TestEnableAlreadyEnabledExplains(t *testing.T) {
+	f := &fakeWatch{wfs: map[string][]workflows.Workflow{"o/a": {buildWF}}}
+	m := onWorkflowsTab(t, f)
+
+	m, _ = step(m, keyMsg("e"))
+	v := view(m)
+	if strings.Contains(v, "y/n") || !strings.Contains(v, "Build and publish is already enabled") {
+		t.Errorf("view:\n%s", v)
+	}
+	if len(f.wfSets) != 0 {
+		t.Errorf("sent %v", f.wfSets)
+	}
+}
+
+func TestRunKeysDoNothingOnWorkflowsTab(t *testing.T) {
+	f := &fakeWatch{wfs: map[string][]workflows.Workflow{"o/a": {buildWF}}}
+	m := onWorkflowsTab(t, f)
+
+	m, _ = step(m, keyMsg("c"))
+	if v := view(m); strings.Contains(v, "y/n") || strings.Contains(v, "cannot") {
+		t.Errorf("run key acted on workflows tab:\n%s", v)
 	}
 }

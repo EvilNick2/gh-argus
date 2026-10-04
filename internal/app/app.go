@@ -19,6 +19,8 @@ import (
 	"github.com/EvilNick2/gh-argus/internal/runsview"
 	"github.com/EvilNick2/gh-argus/internal/runview"
 	"github.com/EvilNick2/gh-argus/internal/watch"
+	"github.com/EvilNick2/gh-argus/internal/workflows"
+	"github.com/EvilNick2/gh-argus/internal/workflowsview"
 )
 
 // Deps are the side effects the app needs, passed in so tests can fake them.
@@ -34,7 +36,11 @@ type Deps struct {
 	SaveSelection func(repos []string) error
 	// Seed returns runs saved by an earlier session, or nil.
 	Seed func(repo string) *watch.Seed
-	Now  func() time.Time
+	// ListWorkflows fetches the workflows of a repo.
+	ListWorkflows func(ctx context.Context, repo string) ([]workflows.Workflow, error)
+	// SetWorkflow enables or disables a workflow.
+	SetWorkflow func(ctx context.Context, repo string, id int64, enabled bool) error
+	Now         func() time.Time
 }
 
 type screen int
@@ -80,16 +86,25 @@ type logMsg struct {
 	err   error
 }
 
-// pendingAction is a run action waiting for y/n.
-type pendingAction struct {
-	repo string
-	run  runs.Run
-	kind actions.Kind
+// wfLoadedMsg carries one repo's workflows, tagged with the watch generation
+// so a load for a replaced selection is dropped.
+type wfLoadedMsg struct {
+	gen int
+	workflowsview.LoadedMsg
 }
 
-// actionDoneMsg reports the result of a run action.
+// pending is a change to GitHub waiting for y/n.
+type pending struct {
+	prompt  string // asked as "<prompt>? y/n"
+	success string // shown when it succeeds
+	failure string // shown as "<failure> failed: <err>"
+	do      func(context.Context) error
+	refresh string // repo whose workflows to reload afterwards, if any
+}
+
+// actionDoneMsg reports the result of a pending change.
 type actionDoneMsg struct {
-	pendingAction
+	pending
 	err error
 }
 
@@ -104,6 +119,8 @@ type Model struct {
 	screen screen
 	picker picker.Model
 	runs   runsview.Model
+	wfs    workflowsview.Model
+	repos  []string
 	tab    int
 
 	gen    int
@@ -120,7 +137,7 @@ type Model struct {
 	logJob runs.Job
 	logRep string
 
-	confirm  *pendingAction
+	confirm  *pending
 	flash    string
 	flashErr bool
 
@@ -152,7 +169,23 @@ func (m *Model) start(repos []string) {
 			}
 		}
 	}
+	m.wfs = workflowsview.New(repos).SetSize(m.width, m.bodyHeight())
+	m.repos = repos
 	m.screen, m.tab = screenTabs, 0
+}
+
+// loadWorkflows fetches the workflows of repos. The fetcher's ETags make a
+// reload of unchanged workflows free.
+func (m Model) loadWorkflows(repos ...string) tea.Cmd {
+	var cmds []tea.Cmd
+	for _, r := range repos {
+		gen, list := m.gen, m.deps.ListWorkflows
+		cmds = append(cmds, func() tea.Msg {
+			wfs, err := list(context.Background(), r)
+			return wfLoadedMsg{gen: gen, LoadedMsg: workflowsview.LoadedMsg{Repo: r, Workflows: wfs, Err: err}}
+		})
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m *Model) stop() {
@@ -243,6 +276,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.runs = m.runs.SetSize(m.width, m.bodyHeight())
+		m.wfs = m.wfs.SetSize(m.width, m.bodyHeight())
 		m.run = m.run.SetSize(m.width, m.runHeight())
 		m.log = m.log.SetSize(m.width, m.runHeight())
 		return m.updatePicker(msg)
@@ -303,9 +337,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case actionDoneMsg:
 		if msg.err != nil {
-			m.flash, m.flashErr = fmt.Sprintf("%v failed: %v", msg.kind, msg.err), true
+			m.flash, m.flashErr = fmt.Sprintf("%s failed: %v", msg.failure, msg.err), true
 		} else {
-			m.flash = fmt.Sprintf("%v requested for #%d", msg.kind, msg.run.RunNumber)
+			m.flash = msg.success
+		}
+		if msg.refresh != "" {
+			return m, m.loadWorkflows(msg.refresh)
+		}
+		return m, nil
+
+	case wfLoadedMsg:
+		if msg.gen == m.gen {
+			m.wfs, _ = m.wfs.Update(msg.LoadedMsg)
 		}
 		return m, nil
 
@@ -319,6 +362,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if kind, ok := actionKeys[msg.String()]; ok && (m.screen == screenRun || m.screen == screenTabs && m.tab == 0) {
 			return m.ask(kind), nil
+		}
+		if k := msg.String(); (k == "e" || k == "d") && m.screen == screenTabs && m.tab == 1 {
+			return m.askWorkflow(k == "e"), nil
 		}
 		switch m.screen {
 		case screenPicker:
@@ -370,7 +416,40 @@ func (m Model) ask(kind actions.Kind) Model {
 		}
 		m.flash = fmt.Sprintf("cannot %s, %s", phrase(kind, r.RunNumber), reason)
 	default:
-		m.confirm = &pendingAction{repo: repo, run: r, kind: kind}
+		act := m.deps.Act
+		m.confirm = &pending{
+			prompt:  phrase(kind, r.RunNumber) + " " + r.Name,
+			success: fmt.Sprintf("%v requested for #%d", kind, r.RunNumber),
+			failure: kind.String(),
+			do:      func(ctx context.Context) error { return act(ctx, repo, r.ID, kind) },
+		}
+	}
+	return m
+}
+
+// askWorkflow starts the y/n prompt to enable or disable the workflow under
+// the cursor, or explains why it does not apply.
+func (m Model) askWorkflow(enable bool) Model {
+	repo, wf, ok := m.wfs.Current()
+	verb, done := "disable", "disabled"
+	if enable {
+		verb, done = "enable", "enabled"
+	}
+	switch {
+	case !ok:
+	case wf.State == "deleted":
+		m.flash = fmt.Sprintf("cannot %s %s, it was deleted", verb, wf.Name)
+	case wf.Enabled() == enable:
+		m.flash = fmt.Sprintf("%s is already %s", wf.Name, done)
+	default:
+		set := m.deps.SetWorkflow
+		m.confirm = &pending{
+			prompt:  fmt.Sprintf("%s workflow %s", verb, wf.Name),
+			success: fmt.Sprintf("%s %s", done, wf.Name),
+			failure: fmt.Sprintf("%s %s", verb, wf.Name),
+			do:      func(ctx context.Context) error { return set(ctx, repo, wf.ID, enable) },
+			refresh: repo,
+		}
 	}
 	return m
 }
@@ -391,10 +470,8 @@ func (m Model) answer(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if msg.String() != "y" {
 		return m, nil
 	}
-	act := m.deps.Act
 	return m, func() tea.Msg {
-		err := act(context.Background(), p.repo, p.run.ID, p.kind)
-		return actionDoneMsg{pendingAction: p, err: err}
+		return actionDoneMsg{pending: p, err: p.do(context.Background())}
 	}
 }
 
@@ -415,14 +492,19 @@ func (m Model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "1", "2", "3", "4", "5":
 		m.tab = int(k[0] - '1')
+		if m.tab == 1 {
+			return m, m.loadWorkflows(m.repos...)
+		}
 		return m, nil
 	}
-	if m.tab == 0 {
-		var cmd tea.Cmd
+	var cmd tea.Cmd
+	switch m.tab {
+	case 0:
 		m.runs, cmd = m.runs.Update(msg)
-		return m, cmd
+	case 1:
+		m.wfs, cmd = m.wfs.Update(msg)
 	}
-	return m, nil
+	return m, cmd
 }
 
 var (
@@ -456,7 +538,12 @@ func (m Model) View() tea.View {
 
 	body := m.runs.View()
 	help := "tab pane  enter open  r/R rerun  c cancel  1-5 tabs  p repos  q quit"
-	if m.tab != 0 {
+	switch m.tab {
+	case 0:
+	case 1:
+		body = m.wfs.View()
+		help = "j/k move  e enable  d disable  1-5 tabs  p repos  q quit"
+	default:
 		t := tabs[m.tab]
 		body = dimStyle.Render(fmt.Sprintf("%s is not built yet, it lands in milestone %d.", t.name, t.milestone))
 		help = "1-5 tabs  p repos  q quit"
@@ -468,8 +555,7 @@ func (m Model) View() tea.View {
 func (m Model) footer(help string) string {
 	switch {
 	case m.confirm != nil:
-		c := m.confirm
-		return fmt.Sprintf("%s %s? y/n", phrase(c.kind, c.run.RunNumber), c.run.Name)
+		return m.confirm.prompt + "? y/n"
 	case m.flashErr:
 		return errStyle.Render(m.flash)
 	case m.flash != "":

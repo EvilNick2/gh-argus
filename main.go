@@ -22,6 +22,7 @@ import (
 	"github.com/EvilNick2/gh-argus/internal/snapshot"
 	"github.com/EvilNick2/gh-argus/internal/store"
 	"github.com/EvilNick2/gh-argus/internal/watch"
+	"github.com/EvilNick2/gh-argus/internal/workflows"
 )
 
 const apiURL = "https://api.github.com"
@@ -115,7 +116,17 @@ func run() error {
 		},
 		SaveSelection: func(rs []string) error { return st.Save("selection", rs) },
 		Seed:          snaps.Seed,
-		Now:           time.Now,
+		ListWorkflows: func(ctx context.Context, repo string) ([]workflows.Workflow, error) {
+			res, err := w.Fetcher.Get(ctx, "/repos/"+repo+"/actions/workflows?per_page=100")
+			if err != nil {
+				return nil, err
+			}
+			return workflows.Decode(res.Body)
+		},
+		SetWorkflow: func(ctx context.Context, repo string, id int64, enabled bool) error {
+			return actions.SetWorkflowEnabled(ctx, client, apiURL, repo, id, enabled)
+		},
+		Now: time.Now,
 	}
 
 	stopFlush := make(chan struct{})
