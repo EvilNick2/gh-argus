@@ -10,6 +10,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/EvilNick2/gh-argus/internal/badge"
 	"github.com/EvilNick2/gh-argus/internal/runs"
 	"github.com/EvilNick2/gh-argus/internal/watch"
 )
@@ -155,38 +156,7 @@ var (
 	boldStyle   = lipgloss.NewStyle().Bold(true)
 	cursorStyle = lipgloss.NewStyle().Reverse(true)
 	errStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
-	badgeStyles = map[string]lipgloss.Style{
-		"pass": lipgloss.NewStyle().Foreground(lipgloss.Color("2")),
-		"fail": lipgloss.NewStyle().Foreground(lipgloss.Color("1")),
-		"err":  lipgloss.NewStyle().Foreground(lipgloss.Color("1")),
-		"run":  lipgloss.NewStyle().Foreground(lipgloss.Color("3")),
-		"wait": lipgloss.NewStyle().Foreground(lipgloss.Color("3")),
-	}
 )
-
-// runBadge is a word of at most 4 letters for a run's state.
-func runBadge(r runs.Run) string {
-	switch r.Status {
-	case "completed":
-	case "in_progress":
-		return "run"
-	default:
-		return "wait"
-	}
-	switch r.Conclusion {
-	case "success":
-		return "pass"
-	case "failure", "timed_out", "startup_failure":
-		return "fail"
-	case "cancelled":
-		return "canc"
-	case "skipped":
-		return "skip"
-	case "action_required":
-		return "act"
-	}
-	return r.Conclusion[:min(4, len(r.Conclusion))]
-}
 
 func repoBadge(st *repoState) string {
 	switch {
@@ -195,13 +165,9 @@ func repoBadge(st *repoState) string {
 	case runs.Active(st.runs):
 		return "run"
 	case len(st.runs) > 0:
-		return runBadge(st.runs[0])
+		return badge.Word(st.runs[0].Status, st.runs[0].Conclusion)
 	}
 	return ""
-}
-
-func badge(word string) string {
-	return badgeStyles[word].Render(fmt.Sprintf("%-4s", word))
 }
 
 func age(d time.Duration) string {
@@ -257,7 +223,7 @@ func (m Model) View() string {
 				name = cursorStyle.Render(name)
 			}
 		}
-		side = append(side, badge(repoBadge(m.state[r]))+" "+name)
+		side = append(side, badge.Render(repoBadge(m.state[r]))+" "+name)
 	}
 
 	paneW := max(10, m.width-sideW-3)
@@ -286,7 +252,7 @@ func (m Model) View() string {
 		if m.focusRuns && i == m.runIdx {
 			title = cursorStyle.Render(title)
 		}
-		pane = append(pane, badge(runBadge(r))+" "+title+dimStyle.Render(tail))
+		pane = append(pane, badge.Render(badge.Word(r.Status, r.Conclusion))+" "+title+dimStyle.Render(tail))
 	}
 
 	var b strings.Builder
