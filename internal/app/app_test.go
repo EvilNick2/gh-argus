@@ -11,6 +11,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/EvilNick2/gh-argus/internal/actions"
 	"github.com/EvilNick2/gh-argus/internal/joblog"
 	"github.com/EvilNick2/gh-argus/internal/picker"
 	"github.com/EvilNick2/gh-argus/internal/repos"
@@ -33,6 +34,9 @@ type fakeWatch struct {
 
 	logCalls []string
 	logBody  []joblog.Line
+
+	acts   []string
+	actErr error
 }
 
 func (f *fakeWatch) deps() Deps {
@@ -58,6 +62,10 @@ func (f *fakeWatch) deps() Deps {
 		FetchLog: func(ctx context.Context, repo string, id int64) ([]joblog.Line, error) {
 			f.logCalls = append(f.logCalls, fmt.Sprintf("%s/%d", repo, id))
 			return f.logBody, nil
+		},
+		Act: func(ctx context.Context, repo string, id int64, k actions.Kind) error {
+			f.acts = append(f.acts, fmt.Sprintf("%s/%d %v", repo, id, k))
+			return f.actErr
 		},
 		Now: func() time.Time { return time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC) },
 	}
@@ -460,5 +468,124 @@ func TestQWhileSearchingLogIsText(t *testing.T) {
 	m, _ = step(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	if v := view(m); !strings.Contains(v, "/q 1/1") {
 		t.Errorf("search for q not applied:\n%s", v)
+	}
+}
+
+var failedRun = runs.Run{ID: 16, RunNumber: 16, Name: "Manifest check", Status: "completed", Conclusion: "failure"}
+
+// onRunsTab returns a model on the Runs tab with failedRun under the cursor.
+func onRunsTab(t *testing.T, f *fakeWatch) Model {
+	t.Helper()
+	m := sized(New(f.deps(), newPicker(), []string{"o/r"}))
+	f.chans[0] <- watch.Event{Repo: "o/r", Initial: true, Runs: []runs.Run{failedRun}}
+	m, _ = step(m, m.wait()())
+	return m
+}
+
+func TestRerunFailedAsksThenActsOnY(t *testing.T) {
+	f := &fakeWatch{}
+	m := onRunsTab(t, f)
+
+	m, _ = step(m, keyMsg("r"))
+	if v := view(m); !strings.Contains(v, "rerun failed jobs of #16 Manifest check? y/n") {
+		t.Errorf("no prompt:\n%s", v)
+	}
+	if len(f.acts) != 0 {
+		t.Fatal("acted before confirming")
+	}
+	m, cmd := step(m, keyMsg("y"))
+	if cmd == nil {
+		t.Fatal("y returned no command")
+	}
+	m, _ = step(m, cmd())
+	if len(f.acts) != 1 || f.acts[0] != "o/r/16 rerun failed jobs" {
+		t.Errorf("acts %v", f.acts)
+	}
+	if v := view(m); !strings.Contains(v, "rerun failed jobs requested for #16") {
+		t.Errorf("no confirmation message:\n%s", v)
+	}
+}
+
+func TestOtherKeyCancelsPrompt(t *testing.T) {
+	f := &fakeWatch{}
+	m := onRunsTab(t, f)
+
+	m, _ = step(m, keyMsg("R"))
+	m, cmd := step(m, keyMsg("q"))
+	if cmd != nil {
+		if _, ok := cmd().(tea.QuitMsg); ok {
+			t.Fatal("q at the prompt quit instead of declining")
+		}
+	}
+	if len(f.acts) != 0 {
+		t.Errorf("acted after declining: %v", f.acts)
+	}
+	if v := view(m); strings.Contains(v, "y/n") {
+		t.Errorf("prompt still shown:\n%s", v)
+	}
+}
+
+func TestDisallowedActionExplainsAndDoesNotPrompt(t *testing.T) {
+	f := &fakeWatch{}
+	m := onRunsTab(t, f)
+
+	m, _ = step(m, keyMsg("c"))
+	v := view(m)
+	if strings.Contains(v, "y/n") || !strings.Contains(v, "cannot cancel #16, it has already completed") {
+		t.Errorf("view:\n%s", v)
+	}
+}
+
+func TestCancelFromRunScreen(t *testing.T) {
+	f := &fakeWatch{}
+	m, _ := onRunScreen(t, f)
+
+	m, _ = step(m, keyMsg("c"))
+	if v := view(m); !strings.Contains(v, "cancel #7 build? y/n") {
+		t.Errorf("cancel prompt:\n%s", v)
+	}
+	m, cmd := step(m, keyMsg("y"))
+	if cmd == nil {
+		t.Fatal("y returned no command")
+	}
+	step(m, cmd())
+	if len(f.acts) != 1 || f.acts[0] != "o/r/7 cancel" {
+		t.Errorf("acts %v", f.acts)
+	}
+}
+
+func TestActionErrorShown(t *testing.T) {
+	f := &fakeWatch{actErr: &actions.StatusError{StatusCode: 403, Message: "Resource not accessible by integration"}}
+	m := onRunsTab(t, f)
+
+	m, _ = step(m, keyMsg("R"))
+	m, cmd := step(m, keyMsg("y"))
+	m, _ = step(m, cmd())
+	if v := view(m); !strings.Contains(v, "rerun all jobs failed: 403 Resource not accessible") {
+		t.Errorf("view:\n%s", v)
+	}
+}
+
+func TestMessageClearsOnNextKey(t *testing.T) {
+	f := &fakeWatch{}
+	m := onRunsTab(t, f)
+
+	m, _ = step(m, keyMsg("c"))
+	m, _ = step(m, keyMsg("j"))
+	if v := view(m); strings.Contains(v, "cannot cancel") {
+		t.Errorf("message not cleared:\n%s", v)
+	}
+}
+
+func TestRefusalPhrasing(t *testing.T) {
+	f := &fakeWatch{}
+	m := sized(New(f.deps(), newPicker(), []string{"o/r"}))
+	passed := runs.Run{ID: 72, RunNumber: 72, Name: "pages", Status: "completed", Conclusion: "success"}
+	f.chans[0] <- watch.Event{Repo: "o/r", Initial: true, Runs: []runs.Run{passed}}
+	m, _ = step(m, m.wait()())
+
+	m, _ = step(m, keyMsg("r"))
+	if v := view(m); !strings.Contains(v, "cannot rerun failed jobs of #72, it succeeded") {
+		t.Errorf("view:\n%s", v)
 	}
 }

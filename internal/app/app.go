@@ -11,6 +11,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/EvilNick2/gh-argus/internal/actions"
 	"github.com/EvilNick2/gh-argus/internal/joblog"
 	"github.com/EvilNick2/gh-argus/internal/logview"
 	"github.com/EvilNick2/gh-argus/internal/picker"
@@ -27,7 +28,9 @@ type Deps struct {
 	// WatchRun polls the jobs of one run until ctx is done.
 	WatchRun func(ctx context.Context, repo string, id int64) <-chan watch.RunEvent
 	// FetchLog downloads and parses the log of a job.
-	FetchLog      func(ctx context.Context, repo string, id int64) ([]joblog.Line, error)
+	FetchLog func(ctx context.Context, repo string, id int64) ([]joblog.Line, error)
+	// Act sends a run action such as a rerun or cancel.
+	Act           func(ctx context.Context, repo string, id int64, k actions.Kind) error
 	SaveSelection func(repos []string) error
 	Now           func() time.Time
 }
@@ -75,6 +78,25 @@ type logMsg struct {
 	err   error
 }
 
+// pendingAction is a run action waiting for y/n.
+type pendingAction struct {
+	repo string
+	run  runs.Run
+	kind actions.Kind
+}
+
+// actionDoneMsg reports the result of a run action.
+type actionDoneMsg struct {
+	pendingAction
+	err error
+}
+
+var actionKeys = map[string]actions.Kind{
+	"r": actions.RerunFailed,
+	"R": actions.RerunAll,
+	"c": actions.Cancel,
+}
+
 type Model struct {
 	deps   Deps
 	screen screen
@@ -95,6 +117,10 @@ type Model struct {
 	logGen int
 	logJob runs.Job
 	logRep string
+
+	confirm  *pendingAction
+	flash    string
+	flashErr bool
 
 	width, height int
 	err           error
@@ -266,9 +292,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.screen = screenRun
 		return m, nil
 
+	case actionDoneMsg:
+		if msg.err != nil {
+			m.flash, m.flashErr = fmt.Sprintf("%v failed: %v", msg.kind, msg.err), true
+		} else {
+			m.flash = fmt.Sprintf("%v requested for #%d", msg.kind, msg.run.RunNumber)
+		}
+		return m, nil
+
 	case tea.KeyPressMsg:
 		if msg.String() == "ctrl+c" {
 			return m, m.quit()
+		}
+		m.flash, m.flashErr = "", false
+		if m.confirm != nil {
+			return m.answer(msg)
+		}
+		if kind, ok := actionKeys[msg.String()]; ok && (m.screen == screenRun || m.screen == screenTabs && m.tab == 0) {
+			return m.ask(kind), nil
 		}
 		switch m.screen {
 		case screenPicker:
@@ -293,6 +334,59 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Picker messages such as status and repo refreshes keep arriving while
 	// the tabs are shown, so the picker is current when reopened.
 	return m.updatePicker(msg)
+}
+
+// ask starts the y/n prompt for kind on the run in focus, or explains why it
+// does not apply.
+func (m Model) ask(kind actions.Kind) Model {
+	var (
+		repo string
+		r    runs.Run
+		ok   = true
+	)
+	if m.screen == screenRun {
+		repo, r = m.run.Run()
+	} else {
+		repo, r, ok = m.runs.Current()
+	}
+	switch {
+	case !ok:
+	case !kind.Allowed(r):
+		reason := "it has not finished"
+		switch {
+		case kind == actions.Cancel:
+			reason = "it has already completed"
+		case r.Status == "completed":
+			reason = "it succeeded"
+		}
+		m.flash = fmt.Sprintf("cannot %s, %s", phrase(kind, r.RunNumber), reason)
+	default:
+		m.confirm = &pendingAction{repo: repo, run: r, kind: kind}
+	}
+	return m
+}
+
+// phrase is the action applied to run number n, such as "cancel #7" or
+// "rerun failed jobs of #16".
+func phrase(kind actions.Kind, n int) string {
+	if kind == actions.Cancel {
+		return fmt.Sprintf("%v #%d", kind, n)
+	}
+	return fmt.Sprintf("%v of #%d", kind, n)
+}
+
+// answer resolves the prompt. Only y sends the action, any other key declines.
+func (m Model) answer(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	p := *m.confirm
+	m.confirm = nil
+	if msg.String() != "y" {
+		return m, nil
+	}
+	act := m.deps.Act
+	return m, func() tea.Msg {
+		err := act(context.Background(), p.repo, p.run.ID, p.kind)
+		return actionDoneMsg{pendingAction: p, err: err}
+	}
 }
 
 func (m Model) updatePicker(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -333,9 +427,9 @@ func (m Model) View() tea.View {
 	case screenPicker:
 		return m.picker.View()
 	case screenRun:
-		return screenView(m.run.View(), m.runHeight(), "j/k job  enter log  esc back  q quit")
+		return screenView(m.run.View(), m.runHeight(), m.footer("j/k job  enter log  r/R rerun  c cancel  esc back  q quit"))
 	case screenLog:
-		return screenView(m.log.View(), m.runHeight(), "j/k scroll  / search  n/N match  w wrap  r reload  esc back  q quit")
+		return screenView(m.log.View(), m.runHeight(), m.footer("j/k scroll  / search  n/N match  w wrap  r reload  esc back  q quit"))
 	}
 
 	var bar []string
@@ -352,22 +446,36 @@ func (m Model) View() tea.View {
 	}
 
 	body := m.runs.View()
-	help := "tab pane  enter open  1-5 tabs  p repos  q quit"
+	help := "tab pane  enter open  r/R rerun  c cancel  1-5 tabs  p repos  q quit"
 	if m.tab != 0 {
 		t := tabs[m.tab]
 		body = dimStyle.Render(fmt.Sprintf("%s is not built yet, it lands in milestone %d.", t.name, t.milestone))
 		help = "1-5 tabs  p repos  q quit"
 	}
-	return screenView(top+"\n\n"+body, m.height-1, help)
+	return screenView(top+"\n\n"+body, m.height-1, m.footer(help))
 }
 
-// screenView pads content to height lines and puts help on the line below.
-func screenView(content string, height int, help string) tea.View {
+// footer is the bottom line: a pending prompt, else a message, else help.
+func (m Model) footer(help string) string {
+	switch {
+	case m.confirm != nil:
+		c := m.confirm
+		return fmt.Sprintf("%s %s? y/n", phrase(c.kind, c.run.RunNumber), c.run.Name)
+	case m.flashErr:
+		return errStyle.Render(m.flash)
+	case m.flash != "":
+		return m.flash
+	}
+	return dimStyle.Render(help)
+}
+
+// screenView pads content to height lines and puts the footer below.
+func screenView(content string, height int, footer string) tea.View {
 	lines := strings.Split(content, "\n")
 	for len(lines) < height {
 		lines = append(lines, "")
 	}
-	v := tea.NewView(strings.Join(lines, "\n") + "\n" + dimStyle.Render(help))
+	v := tea.NewView(strings.Join(lines, "\n") + "\n" + footer)
 	v.AltScreen = true
 	return v
 }

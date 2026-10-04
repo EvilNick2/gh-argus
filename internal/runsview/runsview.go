@@ -61,6 +61,15 @@ func (m Model) current() *repoState {
 	return m.state[m.repos[m.repoIdx]]
 }
 
+// Current returns the run under the runs cursor, which actions apply to.
+func (m Model) Current() (string, runs.Run, bool) {
+	st := m.current()
+	if len(st.runs) == 0 {
+		return "", runs.Run{}, false
+	}
+	return m.repos[m.repoIdx], st.runs[m.runIdx], true
+}
+
 // rows is how many run rows fit below the pane's header and error lines.
 func (m Model) rows() int {
 	return max(1, m.height-2)

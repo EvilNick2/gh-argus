@@ -217,3 +217,17 @@ func TestRunsListScrollsToKeepCursorVisible(t *testing.T) {
 		t.Errorf("view is %d lines, taller than height 8", n)
 	}
 }
+
+func TestCurrentIsRunUnderCursor(t *testing.T) {
+	m := newModel(t)
+
+	m, _ = send(m, key("tab"), key("j"))
+	repo, r, ok := m.Current()
+	if !ok || repo != "EvilNick2/dotfiles" || r.ID != 15 {
+		t.Errorf("Current() = %q, %d, %v, want dotfiles run 15", repo, r.ID, ok)
+	}
+	empty := New([]string{"o/r"}, func() time.Time { return now })
+	if _, _, ok := empty.Current(); ok {
+		t.Error("Current() ok with no runs")
+	}
+}

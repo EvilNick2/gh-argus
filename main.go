@@ -13,6 +13,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/cli/go-gh/v2/pkg/api"
 
+	"github.com/EvilNick2/gh-argus/internal/actions"
 	"github.com/EvilNick2/gh-argus/internal/app"
 	"github.com/EvilNick2/gh-argus/internal/fetch"
 	"github.com/EvilNick2/gh-argus/internal/joblog"
@@ -90,6 +91,9 @@ func run() error {
 				return nil, err
 			}
 			return joblog.Parse(body), nil
+		},
+		Act: func(ctx context.Context, repo string, id int64, k actions.Kind) error {
+			return actions.Do(ctx, client, apiURL, repo, id, k)
 		},
 		SaveSelection: func(rs []string) error { return st.Save("selection", rs) },
 		Now:           time.Now,
