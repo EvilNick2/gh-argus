@@ -6,7 +6,8 @@ func TestDecodeJobsReadsJobsAndSteps(t *testing.T) {
 	body := []byte(`{"total_count":1,"jobs":[{"id":111508379133,"run_id":37226925135,"name":"check",
 		"status":"completed","conclusion":"failure","started_at":"2026-10-04T19:05:26Z",
 		"completed_at":"2026-10-04T19:05:33Z","steps":[{"name":"Set up job","number":1,
-		"status":"completed","conclusion":"success"},{"name":"Run actions/checkout@v4","number":2,
+		"status":"completed","conclusion":"success","started_at":"2026-10-04T19:05:27Z",
+		"completed_at":"2026-10-04T19:05:29Z"},{"name":"Run actions/checkout@v4","number":2,
 		"status":"in_progress","conclusion":null}]}]}`)
 
 	got, err := DecodeJobs(body)
@@ -20,6 +21,9 @@ func TestDecodeJobsReadsJobsAndSteps(t *testing.T) {
 	if j.ID != 111508379133 || j.RunID != 37226925135 || j.Name != "check" ||
 		j.Status != "completed" || j.Conclusion != "failure" || len(j.Steps) != 2 {
 		t.Errorf("decoded %+v", j)
+	}
+	if s := j.Steps[0]; s.CompletedAt.Sub(s.StartedAt).Seconds() != 2 {
+		t.Errorf("step times not parsed: %v to %v", s.StartedAt, s.CompletedAt)
 	}
 	if s := j.Steps[1]; s.Number != 2 || s.Name != "Run actions/checkout@v4" || s.Status != "in_progress" || s.Conclusion != "" {
 		t.Errorf("decoded step %+v", s)

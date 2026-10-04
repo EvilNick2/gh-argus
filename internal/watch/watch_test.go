@@ -224,3 +224,58 @@ func TestNewWatchOnSharedFetcherEmitsInitialFrom304(t *testing.T) {
 		}
 	}
 }
+
+func startRunWatch(t *testing.T, s *runsServer) <-chan RunEvent {
+	t.Helper()
+	srv := httptest.NewServer(s)
+	t.Cleanup(srv.Close)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	w := &Watcher{
+		Fetcher:   fetch.New(srv.Client(), srv.URL),
+		Intervals: Intervals{Active: 5 * time.Millisecond, IdleMin: 5 * time.Millisecond, IdleMax: 5 * time.Millisecond},
+	}
+	events := make(chan RunEvent, 16)
+	go w.WatchRun(ctx, "o/r", 7, events)
+	return events
+}
+
+func receiveRun(t *testing.T, events <-chan RunEvent) RunEvent {
+	t.Helper()
+	select {
+	case ev := <-events:
+		return ev
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for run event")
+		return RunEvent{}
+	}
+}
+
+func TestWatchRunEmitsJobsThenChangesOnly(t *testing.T) {
+	s := &runsServer{status: "in_progress", jobStatus: "in_progress"}
+	events := startRunWatch(t, s)
+
+	ev := receiveRun(t, events)
+	if ev.Err != nil || len(ev.Jobs) != 1 || ev.Jobs[0].Status != "in_progress" {
+		t.Fatalf("first event %+v", ev)
+	}
+	time.Sleep(30 * time.Millisecond)
+	select {
+	case ev := <-events:
+		t.Fatalf("event while unchanged: %+v", ev)
+	default:
+	}
+
+	s.set("completed", "completed")
+	if ev := receiveRun(t, events); len(ev.Jobs) != 1 || ev.Jobs[0].Status != "completed" {
+		t.Fatalf("change event %+v", ev)
+	}
+}
+
+func TestWatchRunReportsErrors(t *testing.T) {
+	events := startRunWatch(t, &runsServer{status: "queued", jobStatus: "queued", failWith: http.StatusNotFound})
+
+	if ev := receiveRun(t, events); ev.Err == nil {
+		t.Fatalf("got %+v, want error", ev)
+	}
+}

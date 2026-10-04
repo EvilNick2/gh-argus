@@ -136,3 +136,61 @@ func (w *Watcher) poll(ctx context.Context, repo string, st *state, ev *Event) e
 	}
 	return nil
 }
+
+// RunEvent carries the jobs of one run, or the error from polling them.
+type RunEvent struct {
+	Jobs []runs.Job
+	Err  error
+}
+
+// WatchRun polls the jobs of run id until ctx is done, for a screen showing
+// that run. It emits the jobs on the first successful poll and whenever they
+// change. While any job is unfinished, or none exist yet, it polls at Active.
+func (w *Watcher) WatchRun(ctx context.Context, repo string, id int64, out chan<- RunEvent) {
+	path := fmt.Sprintf("/repos/%s/actions/runs/%d/jobs?per_page=100", repo, id)
+	var (
+		last     []runs.Job
+		have     bool
+		interval time.Duration
+	)
+	for {
+		var ev RunEvent
+		send := false
+		res, err := w.Fetcher.Get(ctx, path)
+		if ctx.Err() != nil {
+			return
+		}
+		switch {
+		case err != nil:
+			ev.Err, send = err, true
+		case !res.NotModified || !have:
+			jobs, err := runs.DecodeJobs(res.Body)
+			if err != nil {
+				ev.Err, send = err, true
+				break
+			}
+			last, have = jobs, true
+			ev.Jobs, send = jobs, true
+		}
+		if send {
+			select {
+			case out <- ev:
+			case <-ctx.Done():
+				return
+			}
+		}
+
+		active := len(last) == 0
+		for _, j := range last {
+			if j.Status != "completed" {
+				active = true
+			}
+		}
+		interval = w.Intervals.next(interval, ev.Err == nil && active)
+		select {
+		case <-time.After(interval):
+		case <-ctx.Done():
+			return
+		}
+	}
+}
