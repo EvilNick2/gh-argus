@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -13,6 +14,7 @@ import (
 	"github.com/EvilNick2/gh-argus/internal/picker"
 	"github.com/EvilNick2/gh-argus/internal/repos"
 	"github.com/EvilNick2/gh-argus/internal/runs"
+	"github.com/EvilNick2/gh-argus/internal/runsview"
 	"github.com/EvilNick2/gh-argus/internal/watch"
 )
 
@@ -22,6 +24,10 @@ type fakeWatch struct {
 	ctxs  []context.Context
 	chans []chan watch.Event
 	saved [][]string
+
+	runCalls []string
+	runCtxs  []context.Context
+	runChans []chan watch.RunEvent
 }
 
 func (f *fakeWatch) deps() Deps {
@@ -36,6 +42,13 @@ func (f *fakeWatch) deps() Deps {
 		SaveSelection: func(rs []string) error {
 			f.saved = append(f.saved, rs)
 			return nil
+		},
+		WatchRun: func(ctx context.Context, repo string, id int64) <-chan watch.RunEvent {
+			ch := make(chan watch.RunEvent, 4)
+			f.runCalls = append(f.runCalls, fmt.Sprintf("%s/%d", repo, id))
+			f.runCtxs = append(f.runCtxs, ctx)
+			f.runChans = append(f.runChans, ch)
+			return ch
 		},
 		Now: func() time.Time { return time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC) },
 	}
@@ -65,6 +78,8 @@ func keyMsg(s string) tea.Msg {
 		return tea.KeyPressMsg{Code: tea.KeySpace, Text: " "}
 	case "ctrl+c":
 		return tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl}
+	case "esc":
+		return tea.KeyPressMsg{Code: tea.KeyEscape}
 	}
 	return tea.KeyPressMsg{Code: []rune(s)[0], Text: s}
 }
@@ -243,5 +258,104 @@ func TestInitRefreshesPickerEvenWhenReposGiven(t *testing.T) {
 	}
 	if !refreshed {
 		t.Error("picker refresh did not run")
+	}
+}
+
+var openRun = runs.Run{ID: 7, RunNumber: 7, Name: "build", HeadBranch: "main", Status: "in_progress"}
+
+// onRunScreen returns a model watching o/r with run 7 open.
+func onRunScreen(t *testing.T, f *fakeWatch) (Model, tea.Cmd) {
+	t.Helper()
+	m := sized(New(f.deps(), newPicker(), []string{"o/r"}))
+	return step(m, runsview.OpenRunMsg{Repo: "o/r", Run: openRun})
+}
+
+func TestOpenRunWatchesItsJobsAndShowsRunScreen(t *testing.T) {
+	f := &fakeWatch{}
+	m, cmd := onRunScreen(t, f)
+
+	if len(f.runCalls) != 1 || f.runCalls[0] != "o/r/7" {
+		t.Errorf("run watch calls %v", f.runCalls)
+	}
+	v := view(m)
+	if !strings.Contains(v, "o/r #7 build") || !strings.Contains(v, "loading jobs") {
+		t.Errorf("run screen:\n%s", v)
+	}
+	if cmd == nil {
+		t.Error("no command waiting for job events")
+	}
+}
+
+func TestRunEventsReachRunScreen(t *testing.T) {
+	f := &fakeWatch{}
+	m, wait := onRunScreen(t, f)
+
+	f.runChans[0] <- watch.RunEvent{Jobs: []runs.Job{{ID: 70, Name: "compile", Status: "in_progress"}}}
+	m, next := step(m, wait())
+	if v := view(m); !strings.Contains(v, "compile") {
+		t.Errorf("job not shown:\n%s", v)
+	}
+	if next == nil {
+		t.Error("no command to wait for the next job event")
+	}
+}
+
+func TestEscLeavesRunScreenAndStopsJobWatch(t *testing.T) {
+	f := &fakeWatch{}
+	m, _ := onRunScreen(t, f)
+
+	m, cmd := step(m, keyMsg("esc"))
+	m, _ = step(m, cmd())
+	if v := view(m); !strings.Contains(v, "1 Runs") || strings.Contains(v, "loading jobs") {
+		t.Errorf("not back on tabs:\n%s", v)
+	}
+	if f.runCtxs[0].Err() == nil {
+		t.Error("job watch not cancelled")
+	}
+	if f.ctxs[0].Err() != nil {
+		t.Error("repo watch cancelled when leaving the run screen")
+	}
+}
+
+func TestRepoWatchUpdatesOpenRunHeader(t *testing.T) {
+	f := &fakeWatch{}
+	m, _ := onRunScreen(t, f)
+	done := openRun
+	done.Status, done.Conclusion = "completed", "failure"
+
+	f.chans[0] <- watch.Event{Repo: "o/r", Runs: []runs.Run{done}, Changes: []runs.Change{{Prev: &openRun, Run: done}}}
+	m, _ = step(m, m.wait()())
+	if l := strings.Split(view(m), "\n")[0]; !strings.Contains(l, "fail") {
+		t.Errorf("run header %q, want fail", l)
+	}
+}
+
+func TestStaleJobEventsIgnoredAfterReopen(t *testing.T) {
+	f := &fakeWatch{}
+	m, waitOld := onRunScreen(t, f)
+	m, cmd := step(m, keyMsg("esc"))
+	m, _ = step(m, cmd())
+	m, _ = step(m, runsview.OpenRunMsg{Repo: "o/r", Run: openRun})
+
+	f.runChans[0] <- watch.RunEvent{Jobs: []runs.Job{{ID: 1, Name: "stale-job"}}}
+	m, next := step(m, waitOld())
+	if v := view(m); strings.Contains(v, "stale-job") {
+		t.Errorf("stale job shown:\n%s", v)
+	}
+	if next != nil {
+		t.Error("kept waiting on the old job channel")
+	}
+}
+
+func TestQuitFromRunScreenStopsBothWatches(t *testing.T) {
+	f := &fakeWatch{}
+	m, _ := onRunScreen(t, f)
+
+	_, cmd := step(m, keyMsg("q"))
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Error("q did not quit")
+	}
+	if f.ctxs[0].Err() == nil || f.runCtxs[0].Err() == nil {
+		t.Error("watches not cancelled on quit")
 	}
 }

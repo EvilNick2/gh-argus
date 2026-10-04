@@ -12,14 +12,18 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/EvilNick2/gh-argus/internal/picker"
+	"github.com/EvilNick2/gh-argus/internal/runs"
 	"github.com/EvilNick2/gh-argus/internal/runsview"
+	"github.com/EvilNick2/gh-argus/internal/runview"
 	"github.com/EvilNick2/gh-argus/internal/watch"
 )
 
 // Deps are the side effects the app needs, passed in so tests can fake them.
 type Deps struct {
 	// Watch starts watching repos until ctx is done and returns the events.
-	Watch         func(ctx context.Context, repos []string) <-chan watch.Event
+	Watch func(ctx context.Context, repos []string) <-chan watch.Event
+	// WatchRun polls the jobs of one run until ctx is done.
+	WatchRun      func(ctx context.Context, repo string, id int64) <-chan watch.RunEvent
 	SaveSelection func(repos []string) error
 	Now           func() time.Time
 }
@@ -29,6 +33,7 @@ type screen int
 const (
 	screenPicker screen = iota
 	screenTabs
+	screenRun
 )
 
 var tabs = []struct {
@@ -50,6 +55,13 @@ type eventMsg struct {
 	ok  bool
 }
 
+// runEventMsg carries one job event for the run screen, tagged like eventMsg.
+type runEventMsg struct {
+	gen int
+	ev  watch.RunEvent
+	ok  bool
+}
+
 type Model struct {
 	deps   Deps
 	screen screen
@@ -60,6 +72,11 @@ type Model struct {
 	gen    int
 	events <-chan watch.Event
 	cancel context.CancelFunc
+
+	run       runview.Model
+	runGen    int
+	runEvents <-chan watch.RunEvent
+	runCancel context.CancelFunc
 
 	width, height int
 	err           error
@@ -92,6 +109,37 @@ func (m *Model) stop() {
 	}
 }
 
+func (m *Model) openRun(repo string, r runs.Run) {
+	m.stopRun()
+	ctx, cancel := context.WithCancel(context.Background())
+	m.runGen++
+	m.runCancel = cancel
+	m.runEvents = m.deps.WatchRun(ctx, repo, r.ID)
+	m.run = runview.New(repo, r, m.deps.Now).SetSize(m.width, m.runHeight())
+	m.screen = screenRun
+}
+
+func (m *Model) stopRun() {
+	if m.runCancel != nil {
+		m.runCancel()
+		m.runCancel = nil
+	}
+}
+
+func (m *Model) quit() tea.Cmd {
+	m.stopRun()
+	m.stop()
+	return tea.Quit
+}
+
+func (m Model) waitRun() tea.Cmd {
+	gen, ch := m.runGen, m.runEvents
+	return func() tea.Msg {
+		ev, ok := <-ch
+		return runEventMsg{gen: gen, ev: ev, ok: ok}
+	}
+}
+
 func (m Model) wait() tea.Cmd {
 	gen, ch := m.gen, m.events
 	return func() tea.Msg {
@@ -105,6 +153,11 @@ const chromeLines = 3
 
 func (m Model) bodyHeight() int {
 	return max(1, m.height-chromeLines)
+}
+
+// runHeight leaves the run screen one line for help.
+func (m Model) runHeight() int {
+	return max(1, m.height-1)
 }
 
 // Init always runs the picker's init, its repo list refresh, so the list is
@@ -121,6 +174,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.runs = m.runs.SetSize(m.width, m.bodyHeight())
+		m.run = m.run.SetSize(m.width, m.runHeight())
 		return m.updatePicker(msg)
 
 	case eventMsg:
@@ -128,7 +182,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.runs, _ = m.runs.Update(msg.ev)
+		if m.screen == screenRun {
+			if repo, open := m.run.Run(); repo == msg.ev.Repo {
+				for _, r := range msg.ev.Runs {
+					if r.ID == open.ID {
+						m.run = m.run.SetRun(r)
+					}
+				}
+			}
+		}
 		return m, m.wait()
+
+	case runEventMsg:
+		if msg.gen != m.runGen || !msg.ok {
+			return m, nil
+		}
+		m.run, _ = m.run.Update(msg.ev)
+		return m, m.waitRun()
 
 	case picker.ConfirmMsg:
 		m.err = m.deps.SaveSelection(msg.Repos)
@@ -136,16 +206,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.wait()
 
 	case runsview.OpenRunMsg:
-		// The run screen arrives in the next piece.
+		m.openRun(msg.Repo, msg.Run)
+		return m, m.waitRun()
+
+	case runview.BackMsg:
+		m.stopRun()
+		m.screen = screenTabs
+		return m, nil
+
+	case runview.OpenLogMsg:
+		// The log view arrives in the next piece.
 		return m, nil
 
 	case tea.KeyPressMsg:
 		if msg.String() == "ctrl+c" {
-			m.stop()
-			return m, tea.Quit
+			return m, m.quit()
 		}
-		if m.screen == screenPicker {
+		switch m.screen {
+		case screenPicker:
 			return m.updatePicker(msg)
+		case screenRun:
+			if msg.String() == "q" {
+				return m, m.quit()
+			}
+			var cmd tea.Cmd
+			m.run, cmd = m.run.Update(msg)
+			return m, cmd
 		}
 		return m.key(msg)
 	}
@@ -164,8 +250,7 @@ func (m Model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	k := msg.String()
 	switch k {
 	case "q":
-		m.stop()
-		return m, tea.Quit
+		return m, m.quit()
 	case "p":
 		m.stop()
 		m.screen = screenPicker
@@ -189,8 +274,11 @@ var (
 )
 
 func (m Model) View() tea.View {
-	if m.screen == screenPicker {
+	switch m.screen {
+	case screenPicker:
 		return m.picker.View()
+	case screenRun:
+		return screenView(m.run.View(), m.runHeight(), "j/k job  enter log  esc back  q quit")
 	}
 
 	var bar []string
@@ -213,12 +301,16 @@ func (m Model) View() tea.View {
 		body = dimStyle.Render(fmt.Sprintf("%s is not built yet, it lands in milestone %d.", t.name, t.milestone))
 		help = "1-5 tabs  p repos  q quit"
 	}
-	lines := strings.Split(body, "\n")
-	for len(lines) < m.bodyHeight() {
+	return screenView(top+"\n\n"+body, m.height-1, help)
+}
+
+// screenView pads content to height lines and puts help on the line below.
+func screenView(content string, height int, help string) tea.View {
+	lines := strings.Split(content, "\n")
+	for len(lines) < height {
 		lines = append(lines, "")
 	}
-
-	v := tea.NewView(top + "\n\n" + strings.Join(lines, "\n") + "\n" + dimStyle.Render(help))
+	v := tea.NewView(strings.Join(lines, "\n") + "\n" + dimStyle.Render(help))
 	v.AltScreen = true
 	return v
 }

@@ -73,6 +73,14 @@ func run() error {
 			}()
 			return ch
 		},
+		WatchRun: func(ctx context.Context, repo string, id int64) <-chan watch.RunEvent {
+			ch := make(chan watch.RunEvent)
+			go func() {
+				w.WatchRun(ctx, repo, id, ch)
+				close(ch)
+			}()
+			return ch
+		},
 		SaveSelection: func(rs []string) error { return st.Save("selection", rs) },
 		Now:           time.Now,
 	}
