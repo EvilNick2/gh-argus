@@ -34,7 +34,9 @@ brings it back at any time.
 1. **Runs.** Recent runs of each watched repo, live. Open a run to see its
    jobs and steps, then a job's log, with search and word wrap. Rerun,
    cancel, force cancel and delete runs, filter them with `/`, and step back
-   through a run's earlier attempts with `a`.
+   through a run's earlier attempts with `a`. GitHub only publishes a job's
+   log once the job finishes, so until then its log screen shows the steps
+   live, then switches to the full log by itself.
 2. **Workflows.** Every workflow and whether it is enabled. Run one on the
    default branch, or choose a branch and fill in its inputs first. Enable or
    disable it.
@@ -48,6 +50,8 @@ brings it back at any time.
 Press `?` for every key. The mouse works too: click to select, double-click
 to open, scroll with the wheel and use the back button to go back. Hold
 shift to select text for copying.
+
+The terminal bell rings when a watched run finishes.
 
 Anything that changes a repo asks y/n first. The one exception is submitting
 the branch and inputs form, since submitting it is the confirmation.
