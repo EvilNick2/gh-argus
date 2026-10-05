@@ -5,6 +5,10 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/charmbracelet/x/ansi"
+
+	"github.com/EvilNick2/gh-argus/internal/theme"
 )
 
 type thing struct {
@@ -148,7 +152,7 @@ func TestScrollsToKeepCursorVisible(t *testing.T) {
 }
 
 func TestLastItemShowsTrailingGroupsWithoutItems(t *testing.T) {
-	m := newModel(4, "o/a", "o/empty").Load("o/a", a, nil).Load("o/empty", []thing{}, nil)
+	m := newModel(5, "o/a", "o/empty").Load("o/a", a, nil).Load("o/empty", []thing{}, nil)
 
 	out := m.Key("G").Render(view)
 	if !strings.Contains(out, "o/empty") || !strings.Contains(out, "nothing here") || !strings.Contains(out, "a3") {
@@ -184,5 +188,32 @@ func TestAllListsEveryLoadedItemInOrder(t *testing.T) {
 
 	if len(got) != 4 || got[0].id != 1 || got[3].id != 4 {
 		t.Errorf("All() = %v", got)
+	}
+}
+
+func TestRendersOnePaneOfExactSize(t *testing.T) {
+	v := view
+	v.Title = "things"
+	out := ansi.Strip(loaded().Render(v))
+
+	lines := strings.Split(out, "\n")
+	if len(lines) != 20 {
+		t.Fatalf("%d lines, want 20", len(lines))
+	}
+	for i, l := range lines {
+		if w := ansi.StringWidth(l); w != 80 {
+			t.Errorf("line %d is %d wide, want 80: %q", i, w, l)
+		}
+	}
+	if !strings.Contains(lines[0], "things") {
+		t.Errorf("title missing from %q", lines[0])
+	}
+}
+
+func TestSelectedRowIsHighlightedAcrossThePane(t *testing.T) {
+	raw := loaded().Render(view)
+
+	if !strings.Contains(raw, theme.Selected("> a1", 78)) {
+		t.Errorf("selected row not highlighted across the pane's inner width: %q", raw)
 	}
 }

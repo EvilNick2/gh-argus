@@ -63,8 +63,8 @@ func line(t *testing.T, v, substr string) string {
 func TestHeaderShowsRun(t *testing.T) {
 	v := view(newModel(t))
 
-	l := strings.Split(v, "\n")[0]
-	for _, want := range []string{"EvilNick2/dotfiles", "#16 Manifest check", "run", "main"} {
+	l := strings.Join(strings.Split(v, "\n")[:2], " ")
+	for _, want := range []string{"EvilNick2/dotfiles", "#16 Manifest check", "* running", "main"} {
 		if !strings.Contains(l, want) {
 			t.Errorf("header %q missing %q", l, want)
 		}
@@ -74,16 +74,16 @@ func TestHeaderShowsRun(t *testing.T) {
 func TestCursorJobShowsStepsWithDurations(t *testing.T) {
 	v := view(newModel(t))
 
-	if l := line(t, v, "Set up job"); !strings.Contains(l, "pass") || !strings.Contains(l, "2s") {
+	if l := line(t, v, "Set up job"); !strings.Contains(l, "+") || !strings.Contains(l, "2s") {
 		t.Errorf("step line %q", l)
 	}
-	if l := line(t, v, "Validate manifest"); !strings.Contains(l, "run") || !strings.Contains(l, "4s") {
+	if l := line(t, v, "Validate manifest"); !strings.Contains(l, "*") || !strings.Contains(l, "4s") {
 		t.Errorf("running step line %q, want run badge and 4s so far", l)
 	}
 	if strings.Contains(v, "Lint step") {
 		t.Errorf("steps of a job not under the cursor shown:\n%s", v)
 	}
-	if l := line(t, v, "lint"); !strings.Contains(l, "wait") {
+	if l := line(t, v, "lint"); !strings.Contains(l, "o lint") {
 		t.Errorf("queued job line %q", l)
 	}
 }
@@ -149,7 +149,7 @@ func TestSetRunUpdatesHeader(t *testing.T) {
 	done.Status, done.Conclusion = "completed", "failure"
 
 	m = m.SetRun(done)
-	if l := strings.Split(view(m), "\n")[0]; !strings.Contains(l, "fail") {
+	if l := strings.Split(view(m), "\n")[1]; !strings.Contains(l, "x failed") {
 		t.Errorf("header %q, want fail", l)
 	}
 }
@@ -183,5 +183,21 @@ func TestScrollsToKeepCursorJobAndStepsVisible(t *testing.T) {
 	}
 	if n := strings.Count(v, "\n") + 1; n > 8 {
 		t.Errorf("view is %d lines, taller than height 8", n)
+	}
+}
+
+func TestRunScreenIsOnePaneOfFullSize(t *testing.T) {
+	lines := strings.Split(view(newModel(t)), "\n")
+
+	if len(lines) != 20 {
+		t.Fatalf("%d lines, want 20", len(lines))
+	}
+	for i, l := range lines {
+		if w := ansi.StringWidth(l); w != 100 {
+			t.Errorf("line %d is %d wide, want 100: %q", i, w, l)
+		}
+	}
+	if !strings.HasPrefix(lines[0], "╭") || !strings.HasPrefix(lines[19], "╰") {
+		t.Errorf("not framed:\n%s", strings.Join(lines, "\n"))
 	}
 }

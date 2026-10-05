@@ -8,10 +8,11 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/EvilNick2/gh-argus/internal/caches"
 	"github.com/EvilNick2/gh-argus/internal/grouped"
+	"github.com/EvilNick2/gh-argus/internal/theme"
 	"github.com/EvilNick2/gh-argus/internal/timefmt"
 )
 
@@ -64,13 +65,8 @@ func size(n int64) string {
 	return fmt.Sprintf("%.1f GB", float64(n)/(k*k*k))
 }
 
-var (
-	dimStyle    = lipgloss.NewStyle().Faint(true)
-	cursorStyle = lipgloss.NewStyle().Reverse(true)
-)
-
 func pad(s string, n int) string {
-	return s + strings.Repeat(" ", max(0, n-lipgloss.Width(s)))
+	return s + strings.Repeat(" ", max(0, n-ansi.StringWidth(s)))
 }
 
 func truncate(s string, n int) string {
@@ -89,14 +85,12 @@ func (m Model) View() string {
 	}
 	keyW, refW = min(keyW, 50), min(refW, 30)
 	return m.list.Render(grouped.View[caches.Cache]{
-		Row: func(c caches.Cache, selected bool) string {
-			key := pad(truncate(c.Key, keyW), keyW)
-			if selected {
-				key = cursorStyle.Render(key)
-			}
+		Title: "caches",
+		Row: func(c caches.Cache, _ bool) string {
 			used := timefmt.Age(m.now().Sub(c.LastAccessedAt))
-			return "  " + key + "  " + pad(truncate(c.Branch(), refW), refW) + fmt.Sprintf("  %8s  ", size(c.SizeInBytes)) +
-				dimStyle.Render("used "+used+" ago")
+			return "   " + theme.Text().Render(pad(truncate(c.Key, keyW), keyW)) + "  " +
+				theme.Accent().UnsetBold().Render(pad(truncate(c.Branch(), refW), refW)) +
+				fmt.Sprintf("  %8s  ", size(c.SizeInBytes)) + theme.Muted().Render("used "+used+" ago")
 		},
 		Empty: "no caches",
 		Header: func(repo string, cs []caches.Cache) string {

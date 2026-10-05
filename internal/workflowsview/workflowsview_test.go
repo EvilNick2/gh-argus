@@ -182,7 +182,7 @@ func TestCursorStaysAtTopWhenLaterReposLoadAbove(t *testing.T) {
 }
 
 func TestLastWorkflowShowsTrailingReposWithout(t *testing.T) {
-	m := New([]string{"EvilNick2/dotfiles", "o/empty"}).SetSize(100, 4)
+	m := New([]string{"EvilNick2/dotfiles", "o/empty"}).SetSize(100, 5)
 	m, _ = m.Update(LoadedMsg{Repo: "EvilNick2/dotfiles", Workflows: dotfiles})
 	m, _ = m.Update(LoadedMsg{Repo: "o/empty", Workflows: []workflows.Workflow{}})
 

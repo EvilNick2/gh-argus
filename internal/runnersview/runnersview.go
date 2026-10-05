@@ -9,11 +9,12 @@ import (
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/EvilNick2/gh-argus/internal/fetch"
 	"github.com/EvilNick2/gh-argus/internal/grouped"
 	"github.com/EvilNick2/gh-argus/internal/runners"
+	"github.com/EvilNick2/gh-argus/internal/theme"
 )
 
 // LoadedMsg delivers one repo's runners, or the error fetching them.
@@ -46,49 +47,39 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	return m, nil
 }
 
-var (
-	dimStyle    = lipgloss.NewStyle().Faint(true)
-	errStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
-	onlineStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
-	busyStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
-	cursorStyle = lipgloss.NewStyle().Reverse(true)
-)
-
 func notPermitted(err error) string {
 	var se *fetch.StatusError
 	if errors.As(err, &se) && (se.StatusCode == 403 || se.StatusCode == 404) {
-		return dimStyle.Render("not permitted, listing runners needs admin on this repo")
+		return theme.Muted().Render("not permitted, listing runners needs admin on this repo")
 	}
-	return errStyle.Render(err.Error())
+	return theme.Fail().Render(err.Error())
 }
 
 func pad(s string, n int) string {
-	return s + strings.Repeat(" ", max(0, n-lipgloss.Width(s)))
+	return s + strings.Repeat(" ", max(0, n-ansi.StringWidth(s)))
 }
 
-func row(r runners.Runner, nameW int, selected bool) string {
-	state := onlineStyle.Render("online ")
+func row(r runners.Runner, nameW int) string {
+	state := theme.Pass().Render("online ")
 	switch {
 	case r.Status != "online":
-		state = dimStyle.Render(pad(r.Status, 7))
+		state = theme.Muted().Render(pad(r.Status, 7))
 	case r.Busy:
-		state = busyStyle.Render("busy   ")
+		state = theme.Gold().Render("busy   ")
 	}
-	name := pad(r.Name, nameW)
-	if selected {
-		name = cursorStyle.Render(name)
-	}
-	return "  " + state + " " + name + "  " + pad(r.OS, 8) + dimStyle.Render(strings.Join(r.LabelNames(), ", "))
+	return "   " + state + " " + theme.Text().Render(pad(r.Name, nameW)) + "  " + pad(r.OS, 8) +
+		theme.Muted().Render(strings.Join(r.LabelNames(), ", "))
 }
 
 func (m Model) View() string {
 	nameW := 10
 	for _, r := range m.list.All() {
-		nameW = max(nameW, lipgloss.Width(r.Name))
+		nameW = max(nameW, ansi.StringWidth(r.Name))
 	}
 	nameW = min(nameW, 40)
 	return m.list.Render(grouped.View[runners.Runner]{
-		Row:   func(r runners.Runner, selected bool) string { return row(r, nameW, selected) },
+		Title: "self-hosted runners",
+		Row:   func(r runners.Runner, _ bool) string { return row(r, nameW) },
 		Empty: "no self-hosted runners",
 		Error: notPermitted,
 	})

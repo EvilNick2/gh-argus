@@ -7,10 +7,10 @@ import (
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
 	"github.com/sahilm/fuzzy"
 
 	"github.com/EvilNick2/gh-argus/internal/repos"
+	"github.com/EvilNick2/gh-argus/internal/theme"
 )
 
 // StatusFunc returns a command that fetches statuses for names and answers
@@ -37,8 +37,9 @@ type ReposMsg struct {
 
 const statusBatch = 20
 
-// Lines drawn around the rows: title and info above, help below.
-const chromeLines = 3
+// Lines drawn around the rows: the header bar, the pane's border and info
+// line, and the status bar.
+const chromeLines = 5
 
 type Model struct {
 	repos    []repos.Repo
@@ -286,84 +287,77 @@ func (m Model) Selected() []string {
 	return out
 }
 
-var (
-	titleStyle   = lipgloss.NewStyle().Bold(true)
-	dimStyle     = lipgloss.NewStyle().Faint(true)
-	cursorStyle  = lipgloss.NewStyle().Reverse(true)
-	passStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
-	failStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
-	runStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
-	errorStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
-	privateLabel = dimStyle.Render("private")
-)
-
+// badge is a repo's CI status as an icon: . while it loads, blank with no
+// Actions runs.
 func (m Model) badge(name string) string {
 	s, ok := m.statuses[name]
 	switch {
 	case !ok && m.asked[name]:
-		return dimStyle.Render("... ")
+		return theme.Muted().Render(".")
 	case !ok:
-		return "    "
+		return " "
 	}
 	switch s {
 	case repos.StatusPassing:
-		return passStyle.Render("pass")
+		return theme.Pass().Render("+")
 	case repos.StatusFailing:
-		return failStyle.Render("fail")
+		return theme.Fail().Render("x")
 	case repos.StatusRunning:
-		return runStyle.Render("run ")
+		return theme.Gold().Render("*")
 	}
-	return "    "
+	return " "
 }
 
 func (m Model) View() tea.View {
-	var b strings.Builder
-	b.WriteString(titleStyle.Render("gh argus") + dimStyle.Render("  pick repos to watch") + "\n")
-
-	owner := "all"
+	inner := max(10, m.width-2)
+	owner := "all owners"
 	if m.owner > 0 {
 		owner = m.owners[m.owner-1]
 	}
-	info := fmt.Sprintf("owner: %s  %d/%d repos  %d selected", owner, len(m.visible), len(m.repos), len(m.Selected()))
+	info := fmt.Sprintf("%s  %d of %d repos  %d selected", owner, len(m.visible), len(m.repos), len(m.Selected()))
 	if m.filtering || m.filter != "" {
-		info = "/" + m.filter + "  " + info
+		cursor := ""
+		if m.filtering {
+			cursor = "_"
+		}
+		info = "/" + m.filter + cursor + "  " + info
 	}
 	if len(m.repos) == 0 && !m.loaded {
 		info += "  loading repos"
 	}
+	body := []string{" " + theme.Muted().Render(info)}
 	if m.err != nil {
-		info += "  " + errorStyle.Render(m.err.Error())
+		body[0] += "  " + theme.Fail().Render(m.err.Error())
 	}
-	b.WriteString(dimStyle.Render(info) + "\n")
 
 	end := min(len(m.visible), m.offset+m.rows())
 	for i := m.offset; i < end; i++ {
 		r := m.repos[m.visible[i]]
-		box := "[ ]"
+		box := theme.Muted().Render("[ ]")
 		if m.selected[r.FullName] {
-			box = "[x]"
+			box = theme.Accent().Render("[x]")
 		}
-		name := r.FullName
-		if i == m.cursor {
-			name = cursorStyle.Render(name)
-		}
-		line := box + " " + m.badge(r.FullName) + " " + name
+		row := " " + box + " " + m.badge(r.FullName) + " " + theme.Text().Render(r.FullName)
 		if r.Private {
-			line += "  " + privateLabel
+			row += "  " + theme.Muted().Render("private")
 		}
-		b.WriteString(line + "\n")
-	}
-	for i := end - m.offset; i < m.rows(); i++ {
-		b.WriteString("\n")
+		if i == m.cursor {
+			row = theme.Selected(row, inner)
+		}
+		body = append(body, row)
 	}
 
 	help := "space select  enter watch  / filter  o owner  q quit"
 	if m.filtering {
 		help = "type to filter  enter done  esc clear"
 	}
-	b.WriteString(dimStyle.Render(help))
-
-	v := tea.NewView(b.String())
+	paneH := max(3, m.height-2)
+	lines := []string{
+		theme.Bar(theme.Accent().Render(" argus")+theme.Muted().Render("  pick repos to watch"), "", m.width),
+		theme.Pane("repos", strings.Join(body, "\n"), m.width, paneH, true),
+		theme.Bar("", theme.Muted().Render(help+" "), m.width),
+	}
+	v := tea.NewView(strings.Join(lines, "\n"))
 	v.AltScreen = true
 	return v
 }

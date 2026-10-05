@@ -6,9 +6,10 @@ import (
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/EvilNick2/gh-argus/internal/grouped"
+	"github.com/EvilNick2/gh-argus/internal/theme"
 	"github.com/EvilNick2/gh-argus/internal/workflows"
 )
 
@@ -47,31 +48,21 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	return m, nil
 }
 
-var (
-	dimStyle    = lipgloss.NewStyle().Faint(true)
-	onStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
-	offStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
-	cursorStyle = lipgloss.NewStyle().Reverse(true)
-)
-
 func pad(s string, n int) string {
-	return s + strings.Repeat(" ", max(0, n-lipgloss.Width(s)))
+	return s + strings.Repeat(" ", max(0, n-ansi.StringWidth(s)))
 }
 
-func row(w workflows.Workflow, nameW int, selected bool) string {
-	state := onStyle.Render("on ")
+func row(w workflows.Workflow, nameW int) string {
+	state := theme.Pass().Render("on ")
 	switch {
 	case w.State == "deleted":
-		state = dimStyle.Render("del")
+		state = theme.Muted().Render("del")
 	case !w.Enabled():
-		state = offStyle.Render("off")
+		state = theme.Gold().Render("off")
 	}
-	name := pad(w.Name, nameW)
-	switch {
-	case selected:
-		name = cursorStyle.Render(name)
-	case w.Dynamic():
-		name = dimStyle.Render(name)
+	name := theme.Text().Render(pad(w.Name, nameW))
+	if w.Dynamic() {
+		name = theme.Muted().Render(pad(w.Name, nameW))
 	}
 	tail := w.Path
 	if w.Dynamic() {
@@ -80,17 +71,18 @@ func row(w workflows.Workflow, nameW int, selected bool) string {
 	if !w.Enabled() && w.State != "deleted" {
 		tail += "  " + strings.ReplaceAll(w.State, "_", " ")
 	}
-	return "  " + state + " " + name + "  " + dimStyle.Render(tail)
+	return "   " + state + " " + name + "  " + theme.Muted().Render(tail)
 }
 
 func (m Model) View() string {
 	nameW := 10
 	for _, w := range m.list.All() {
-		nameW = max(nameW, lipgloss.Width(w.Name))
+		nameW = max(nameW, ansi.StringWidth(w.Name))
 	}
 	nameW = min(nameW, 40)
 	return m.list.Render(grouped.View[workflows.Workflow]{
-		Row:   func(w workflows.Workflow, selected bool) string { return row(w, nameW, selected) },
+		Title: "workflows",
+		Row:   func(w workflows.Workflow, _ bool) string { return row(w, nameW) },
 		Empty: "no workflows",
 	})
 }

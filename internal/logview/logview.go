@@ -10,9 +10,9 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/EvilNick2/gh-argus/internal/badge"
 	"github.com/EvilNick2/gh-argus/internal/joblog"
 	"github.com/EvilNick2/gh-argus/internal/runs"
+	"github.com/EvilNick2/gh-argus/internal/theme"
 )
 
 // LogMsg delivers a fetched log, or the error from fetching it.
@@ -72,8 +72,9 @@ func (m Model) Searching() bool {
 	return m.searching
 }
 
+// bodyRows is how many log rows fit inside the pane below its status line.
 func (m Model) bodyRows() int {
-	return max(1, m.height-2)
+	return max(1, m.height-3)
 }
 
 func (m Model) topLine() int {
@@ -84,7 +85,22 @@ func (m Model) topLine() int {
 }
 
 func (m *Model) clamp() {
-	m.top = max(0, min(m.top, len(m.rows)-m.bodyRows()))
+	m.top = max(0, min(m.top, m.endTop()))
+}
+
+// endTop is the top row at the end of the log: the first whole line that
+// lets the last line show, so the top row is never the tail of a wrapped
+// line.
+func (m Model) endTop() int {
+	top := max(0, len(m.rows)-m.bodyRows())
+	for top > 0 && top < len(m.rows) && m.rows[top].line == m.rows[top-1].line {
+		top++
+	}
+	return top
+}
+
+func (m *Model) toEnd() {
+	m.top = m.endTop()
 }
 
 // showLine scrolls so line is visible with up to above lines of context.
@@ -105,7 +121,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		m.lines, m.loaded = msg.Lines, true
 		m.findMatches()
 		m.layout()
-		m.top = len(m.rows)
+		m.toEnd()
 		for i, l := range m.lines {
 			if l.Kind == joblog.Error {
 				m.showLine(i, contextLines)
@@ -141,7 +157,8 @@ func (m Model) key(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	case "home", "g":
 		m.top = 0
 	case "end", "G":
-		m.top = len(m.rows)
+		m.toEnd()
+		return m, nil
 	case "w":
 		line := m.topLine()
 		m.wrap = !m.wrap
@@ -210,18 +227,20 @@ func (m *Model) findMatches() {
 	}
 }
 
-var (
-	boldStyle = lipgloss.NewStyle().Bold(true)
-	dimStyle  = lipgloss.NewStyle().Faint(true)
-	errStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
-	kindStyle = map[joblog.Kind]lipgloss.Style{
-		joblog.Plain:   lipgloss.NewStyle(),
-		joblog.Group:   lipgloss.NewStyle().Bold(true),
-		joblog.Error:   lipgloss.NewStyle().Foreground(lipgloss.Color("1")),
-		joblog.Warning: lipgloss.NewStyle().Foreground(lipgloss.Color("3")),
-		joblog.Command: lipgloss.NewStyle().Foreground(lipgloss.Color("6")),
+// kindStyle colours a line by its marker.
+func kindStyle(k joblog.Kind) lipgloss.Style {
+	switch k {
+	case joblog.Group:
+		return theme.Bold()
+	case joblog.Error:
+		return theme.Fail()
+	case joblog.Warning:
+		return theme.Gold()
+	case joblog.Command:
+		return theme.Accent().UnsetBold()
 	}
-)
+	return theme.Text()
+}
 
 // display is a line's text as shown, with the prefix GitHub's log UI uses.
 func display(l joblog.Line) string {
@@ -239,7 +258,7 @@ func display(l joblog.Line) string {
 // styled renders a line in its kind's style with query matches reversed.
 func styled(l joblog.Line, query string) string {
 	s := display(l)
-	st := kindStyle[l.Kind]
+	st := kindStyle(l.Kind)
 	lower := strings.ToLower(s)
 	q := strings.ToLower(query)
 	// Byte offsets from the lowered copy only hold when lowering kept lengths.
@@ -254,7 +273,7 @@ func styled(l joblog.Line, query string) string {
 			return b.String()
 		}
 		b.WriteString(st.Render(s[:i]))
-		b.WriteString(st.Reverse(true).Render(s[i : i+len(q)]))
+		b.WriteString(theme.Match().Render(s[i : i+len(q)]))
 		s, lower = s[i+len(q):], lower[i+len(q):]
 	}
 }
@@ -263,7 +282,8 @@ func styled(l joblog.Line, query string) string {
 func (m *Model) layout() {
 	m.rows = nil
 	m.firstRow = make([]int, len(m.lines))
-	w := max(1, m.width)
+	// Rows sit inside the pane's border with one space of padding.
+	w := max(1, m.width-3)
 	for i, l := range m.lines {
 		m.firstRow[i] = len(m.rows)
 		s := styled(l, m.query)
@@ -279,41 +299,38 @@ func (m *Model) layout() {
 
 func (m Model) View() string {
 	j := m.job
-	header := boldStyle.Render(m.repo) + "  " + boldStyle.Render(j.Name) + "  " +
-		badge.Render(badge.Word(j.Status, j.Conclusion))
-
-	var status string
+	status := " " + theme.Icon(j.Status, j.Conclusion) + " " + theme.Text().Render(theme.StateWord(j.Status, j.Conclusion)) + "  "
 	switch {
 	case m.err != nil:
-		status = errStyle.Render(m.err.Error())
+		status += theme.Fail().Render(m.err.Error())
 	case !m.loaded:
-		status = dimStyle.Render("loading log")
+		status += theme.Muted().Render("loading log")
 	default:
 		end := min(len(m.rows), m.top+m.bodyRows())
 		first, last := 0, 0
 		if len(m.rows) > 0 {
 			first, last = m.rows[m.top].line+1, m.rows[end-1].line+1
 		}
-		status = fmt.Sprintf("lines %d-%d of %d", first, last, len(m.lines))
+		info := fmt.Sprintf("lines %d-%d of %d", first, last, len(m.lines))
 		if !m.wrap {
-			status += "  wrap off"
+			info += "  wrap off"
 		}
 		switch {
 		case m.searching:
-			status += "  /" + m.query
+			info += "  /" + m.query + "_"
 		case m.query != "" && len(m.matches) == 0:
-			status += "  /" + m.query + " no matches"
+			info += "  /" + m.query + " no matches"
 		case m.query != "":
-			status += fmt.Sprintf("  /%s %d/%d", m.query, m.match+1, len(m.matches))
+			info += fmt.Sprintf("  /%s %d/%d", m.query, m.match+1, len(m.matches))
 		}
-		status = dimStyle.Render(status)
+		status += theme.Muted().Render(info)
 	}
 
-	out := []string{ansi.Truncate(header, m.width, ".."), ansi.Truncate(status, m.width, "..")}
+	out := []string{status}
 	if m.loaded {
 		for _, r := range m.rows[m.top:min(len(m.rows), m.top+m.bodyRows())] {
-			out = append(out, r.text)
+			out = append(out, " "+r.text)
 		}
 	}
-	return strings.Join(out, "\n")
+	return theme.Pane(m.repo+"  "+j.Name, strings.Join(out, "\n"), m.width, m.height, true)
 }

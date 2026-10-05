@@ -9,10 +9,11 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/EvilNick2/gh-argus/internal/metrics"
 	"github.com/EvilNick2/gh-argus/internal/runs"
+	"github.com/EvilNick2/gh-argus/internal/theme"
 	"github.com/EvilNick2/gh-argus/internal/timefmt"
 )
 
@@ -110,15 +111,6 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	return m, nil
 }
 
-var (
-	boldStyle   = lipgloss.NewStyle().Bold(true)
-	dimStyle    = lipgloss.NewStyle().Faint(true)
-	errStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
-	passStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
-	failStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
-	cursorStyle = lipgloss.NewStyle().Reverse(true)
-)
-
 // glyphs renders recent results so they read without colour: + passed,
 // x failed, . anything else.
 func glyphs(history []string) string {
@@ -126,18 +118,18 @@ func glyphs(history []string) string {
 	for _, w := range history {
 		switch w {
 		case "pass":
-			b.WriteString(passStyle.Render("+"))
+			b.WriteString(theme.Pass().Render("+"))
 		case "fail":
-			b.WriteString(failStyle.Render("x"))
+			b.WriteString(theme.Fail().Render("x"))
 		default:
-			b.WriteString(dimStyle.Render("."))
+			b.WriteString(theme.Muted().Render("."))
 		}
 	}
 	return b.String()
 }
 
 func pad(s string, n int) string {
-	return s + strings.Repeat(" ", max(0, n-lipgloss.Width(s)))
+	return s + strings.Repeat(" ", max(0, n-ansi.StringWidth(s)))
 }
 
 func truncate(s string, n int) string {
@@ -161,6 +153,7 @@ func columns(s metrics.Stat) string {
 }
 
 func (m Model) View() string {
+	inner := max(10, m.width-2)
 	nameW := 12
 	for _, r := range m.repos {
 		nameW = max(nameW, len(r))
@@ -170,7 +163,7 @@ func (m Model) View() string {
 	}
 	nameW = min(nameW, 40)
 
-	header := dimStyle.Render(pad("", nameW) + fmt.Sprintf("%5s %8s %7s %7s %7s  %s", "runs", "success", "median", "trend", "reruns", "recent"))
+	header := theme.Muted().Render(" " + pad("", nameW) + fmt.Sprintf("%5s %8s %7s %7s %7s  %s", "runs", "success", "median", "trend", "reruns", "recent"))
 
 	items := m.items()
 	var rows []string
@@ -180,32 +173,31 @@ func (m Model) View() string {
 		name := pad(truncate(r, nameW), nameW)
 		switch {
 		case st.err != nil:
-			rows = append(rows, boldStyle.Render(name)+errStyle.Render(st.err.Error()))
+			rows = append(rows, " "+theme.Bold().Render(name)+theme.Fail().Render(st.err.Error()))
 			continue
 		case !st.loaded:
-			rows = append(rows, boldStyle.Render(name)+dimStyle.Render("loading"))
+			rows = append(rows, " "+theme.Bold().Render(name)+theme.Muted().Render("loading"))
 			continue
 		case st.total.Runs == 0:
-			rows = append(rows, boldStyle.Render(name)+dimStyle.Render("no completed runs"))
+			rows = append(rows, " "+theme.Bold().Render(name)+theme.Muted().Render("no completed runs"))
 			continue
 		}
 		for i := -1; i < len(st.per); i++ {
-			s, label := st.total, name
+			s, label := st.total, theme.Bold().Render(name)
 			if i >= 0 {
-				s, label = st.per[i], pad(truncate("  "+st.per[i].Name, nameW), nameW)
+				s, label = st.per[i], theme.Text().Render(pad(truncate("  "+st.per[i].Name, nameW), nameW))
 			}
-			switch {
-			case idx == m.cursor:
-				label, cursorRow = cursorStyle.Render(label), len(rows)
-			case i < 0:
-				label = boldStyle.Render(label)
+			row := " " + label + theme.Text().Render(columns(s)) + glyphs(s.History)
+			if idx == m.cursor {
+				row, cursorRow = theme.Selected(row, inner), len(rows)
 			}
-			rows = append(rows, label+columns(s)+glyphs(s.History))
+			rows = append(rows, row)
 			idx++
 		}
 	}
 
-	body := max(1, m.height-2)
+	// The pane holds the column header, the rows and a detail line.
+	body := max(1, m.height-4)
 	offset := 0
 	if cursorRow >= body {
 		offset = cursorRow - body + 1
@@ -223,8 +215,9 @@ func (m Model) View() string {
 		if it.wf >= 0 {
 			name = s.Name
 		}
-		detail = dimStyle.Render(fmt.Sprintf("%s: last run %s ago, queue median %s, %d cancelled",
+		detail = theme.Muted().Render(fmt.Sprintf(" %s: last run %s ago, queue median %s, %d cancelled",
 			name, timefmt.Age(m.now().Sub(s.Last)), timefmt.Duration(s.QueueMedian), s.Cancelled))
 	}
-	return strings.Join(append(append([]string{header}, rows...), detail), "\n")
+	content := append(append([]string{header}, rows...), detail)
+	return theme.Pane("metrics, last 100 runs per repo", strings.Join(content, "\n"), m.width, m.height, true)
 }

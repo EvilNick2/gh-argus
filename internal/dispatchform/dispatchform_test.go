@@ -278,3 +278,19 @@ func TestEmptyBranchBlocksSubmit(t *testing.T) {
 		t.Errorf("view:\n%s", v)
 	}
 }
+
+func TestFormIsOnePaneOfFullSize(t *testing.T) {
+	lines := strings.Split(view(newModel(inputs)), "\n")
+
+	if len(lines) != 20 {
+		t.Fatalf("%d lines, want 20", len(lines))
+	}
+	for i, l := range lines {
+		if w := ansi.StringWidth(l); w != 80 {
+			t.Errorf("line %d is %d wide, want 80: %q", i, w, l)
+		}
+	}
+	if !strings.Contains(lines[0], "run Publish embedder on main") {
+		t.Errorf("title %q", lines[0])
+	}
+}

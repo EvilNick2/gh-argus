@@ -186,3 +186,17 @@ func TestSeedDoesNotReplaceCachedBody(t *testing.T) {
 		t.Errorf("got NotModified=%v body=%q, want the cached body kept", res.NotModified, res.Body)
 	}
 }
+
+func TestRemainingTracksLatestResponse(t *testing.T) {
+	f := newFetcher(t, &etagServer{etag: `W/"a"`, body: `{}`})
+
+	if got := f.Remaining(); got != -1 {
+		t.Errorf("Remaining() before any request = %d, want -1", got)
+	}
+	if _, err := f.Get(context.Background(), "/runs"); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.Remaining(); got != 4990 {
+		t.Errorf("Remaining() = %d, want 4990", got)
+	}
+}

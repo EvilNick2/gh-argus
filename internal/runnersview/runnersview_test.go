@@ -10,6 +10,7 @@ import (
 
 	"github.com/EvilNick2/gh-argus/internal/fetch"
 	"github.com/EvilNick2/gh-argus/internal/runners"
+	"github.com/EvilNick2/gh-argus/internal/theme"
 )
 
 var relay = runners.Runner{ID: 21, Name: "dockhand-relay", OS: "Linux", Status: "online",
@@ -57,7 +58,7 @@ func TestNotPermittedFor403And404(t *testing.T) {
 		if !strings.Contains(v, "not permitted") || strings.Contains(v, "Not Found") {
 			t.Errorf("%d: view:\n%s", code, v)
 		}
-		if raw := m.View(); strings.Contains(raw, "\x1b[31m") {
+		if raw := m.View(); strings.Contains(raw, theme.Fail().Render("not permitted, listing runners needs admin on this repo")) {
 			t.Errorf("%d: not permitted drawn in red: %q", code, raw)
 		}
 	}

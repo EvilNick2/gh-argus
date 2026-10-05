@@ -59,7 +59,10 @@ func line(t *testing.T, v, substr string) string {
 	return ""
 }
 
-func fields(l string) []string { return strings.Fields(l) }
+// fields splits a pane row into words, without the side borders.
+func fields(l string) []string {
+	return strings.Fields(strings.Trim(l, "│"))
+}
 
 func TestLoadingBeforeRunsArrive(t *testing.T) {
 	m := New([]string{"o/r"}, func() time.Time { return now }).SetSize(110, 20)
@@ -70,7 +73,7 @@ func TestLoadingBeforeRunsArrive(t *testing.T) {
 }
 
 func TestHeaderNamesColumns(t *testing.T) {
-	l := strings.Split(view(newModel()), "\n")[0]
+	l := strings.Split(view(newModel()), "\n")[1]
 
 	for _, want := range []string{"runs", "success", "median", "trend", "reruns", "recent"} {
 		if !strings.Contains(l, want) {
@@ -176,5 +179,18 @@ func TestScrollsToKeepCursorVisible(t *testing.T) {
 	}
 	if n := strings.Count(v, "\n") + 1; n > 8 {
 		t.Errorf("view is %d lines, taller than 8", n)
+	}
+}
+
+func TestMetricsIsOnePaneOfFullSize(t *testing.T) {
+	lines := strings.Split(view(newModel()), "\n")
+
+	if len(lines) != 20 {
+		t.Fatalf("%d lines, want 20", len(lines))
+	}
+	for i, l := range lines {
+		if w := ansi.StringWidth(l); w != 110 {
+			t.Errorf("line %d is %d wide, want 110: %q", i, w, l)
+		}
 	}
 }

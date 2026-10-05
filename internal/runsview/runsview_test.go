@@ -18,12 +18,12 @@ var now = time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)
 func ago(d time.Duration) time.Time { return now.Add(-d) }
 
 var dotfilesRuns = []runs.Run{
-	{ID: 16, RunNumber: 16, Name: "Manifest check", HeadBranch: "main", Status: "in_progress", CreatedAt: ago(12 * time.Second)},
-	{ID: 15, RunNumber: 15, Name: "Manifest check", HeadBranch: "main", Status: "completed", Conclusion: "success", CreatedAt: ago(time.Hour)},
+	{ID: 16, RunNumber: 16, Name: "Manifest check", DisplayTitle: "feat: add wrapper", HeadBranch: "main", Status: "in_progress", CreatedAt: ago(12 * time.Second)},
+	{ID: 15, RunNumber: 15, Name: "Manifest check", DisplayTitle: "docs: setup notes", HeadBranch: "main", Status: "completed", Conclusion: "success", CreatedAt: ago(time.Hour)},
 }
 
 var orpheusRuns = []runs.Run{
-	{ID: 41, RunNumber: 41, Name: "Release", HeadBranch: "main", Status: "completed", Conclusion: "failure", CreatedAt: ago(3 * time.Minute)},
+	{ID: 41, RunNumber: 41, Name: "Release", DisplayTitle: "chore: release 1.4", HeadBranch: "main", Status: "completed", Conclusion: "failure", CreatedAt: ago(3 * time.Minute)},
 }
 
 func newModel(t *testing.T) Model {
@@ -65,28 +65,61 @@ func line(t *testing.T, view, substr string) string {
 	return ""
 }
 
+// panes splits a body line where the repos pane meets the runs pane. Border
+// lines have no such junction and split into nothing.
+func panes(l string) (side, runs string) {
+	if i := strings.Index(l, "││"); i >= 0 {
+		return l[:i+len("│")], l[i+len("│"):]
+	}
+	return "", ""
+}
+
+// sideRow is the repos pane part of the first line whose repos pane holds name.
+func sideRow(t *testing.T, view, name string) string {
+	t.Helper()
+	for _, l := range strings.Split(ansi.Strip(view), "\n") {
+		if side, _ := panes(l); strings.Contains(side, name) {
+			return side
+		}
+	}
+	t.Fatalf("no repos pane row with %q in:\n%s", name, view)
+	return ""
+}
+
+// runRow is the runs pane part of the first line whose runs pane holds substr.
+func runRow(t *testing.T, view, substr string) string {
+	t.Helper()
+	for _, l := range strings.Split(ansi.Strip(view), "\n") {
+		if _, runs := panes(l); strings.Contains(runs, substr) {
+			return runs
+		}
+	}
+	t.Fatalf("no runs pane row with %q in:\n%s", substr, view)
+	return ""
+}
+
 func TestSidebarBadgesFromRuns(t *testing.T) {
 	v := newModel(t).View()
 
 	// dotfiles has a run in progress, orpheus's latest run failed.
-	if l := line(t, v, "orpheus"); !strings.Contains(l, "fail") {
-		t.Errorf("orpheus sidebar line %q, want fail badge", l)
+	if l := sideRow(t, v, "orpheus"); !strings.Contains(l, "x orpheus") {
+		t.Errorf("orpheus sidebar row %q, want x", l)
 	}
-	if l := line(t, v, "dotfiles "); !strings.Contains(l, "run") {
-		t.Errorf("dotfiles sidebar line %q, want run badge", l)
+	if l := sideRow(t, v, "dotfiles"); !strings.Contains(l, "* dotfiles") {
+		t.Errorf("dotfiles sidebar row %q, want *", l)
 	}
 }
 
 func TestRunsPaneShowsHighlightedRepo(t *testing.T) {
 	m := newModel(t)
 
-	v := m.View()
-	if !strings.Contains(v, "#16 Manifest check") || strings.Contains(v, "#41 Release") {
+	v := ansi.Strip(m.View())
+	if !strings.Contains(v, "feat: add wrapper") || strings.Contains(v, "#41") {
 		t.Errorf("first repo's runs not shown alone:\n%s", v)
 	}
 	m, _ = send(m, key("j"))
-	v = m.View()
-	if !strings.Contains(v, "#41 Release") || strings.Contains(v, "#16 Manifest check") {
+	v = ansi.Strip(m.View())
+	if !strings.Contains(v, "chore: release 1.4") || strings.Contains(v, "#16") {
 		t.Errorf("j in sidebar did not switch repo:\n%s", v)
 	}
 }
@@ -94,13 +127,13 @@ func TestRunsPaneShowsHighlightedRepo(t *testing.T) {
 func TestRunRowsShowStateBranchAndAge(t *testing.T) {
 	v := newModel(t).View()
 
-	l := line(t, v, "#15 Manifest check")
-	for _, want := range []string{"pass", "main", "1h"} {
+	l := runRow(t, v, "#15")
+	for _, want := range []string{"+ #15", "main", "1h ago", "Manifest check"} {
 		if !strings.Contains(l, want) {
 			t.Errorf("run row %q missing %q", l, want)
 		}
 	}
-	if l := line(t, v, "#16 Manifest check"); !strings.Contains(l, "12s") || !strings.Contains(l, "run") {
+	if l := runRow(t, v, "#16"); !strings.Contains(l, "* #16") || !strings.Contains(l, "12s ago") {
 		t.Errorf("in-progress run row %q", l)
 	}
 }
@@ -139,11 +172,11 @@ func TestChangeEventUpdatesRuns(t *testing.T) {
 
 	m, _ = send(m, watch.Event{Repo: "EvilNick2/dotfiles", Runs: done, Changes: []runs.Change{{Prev: &dotfilesRuns[0], Run: done[0]}}})
 	v := m.View()
-	if l := line(t, v, "#16 Manifest check"); !strings.Contains(l, "fail") {
-		t.Errorf("updated run row %q, want fail", l)
+	if l := runRow(t, v, "#16"); !strings.Contains(l, "x #16") {
+		t.Errorf("updated run row %q, want x", l)
 	}
-	if l := line(t, v, "dotfiles "); !strings.Contains(l, "fail") {
-		t.Errorf("sidebar line %q, want fail after the active run failed", l)
+	if l := sideRow(t, v, "dotfiles"); !strings.Contains(l, "x dotfiles") {
+		t.Errorf("sidebar row %q, want x after the active run failed", l)
 	}
 }
 
@@ -152,8 +185,8 @@ func TestErrorEventShowsOnRepo(t *testing.T) {
 
 	m, _ = send(m, watch.Event{Repo: "EvilNick2/orpheus", Err: errors.New("GET /repos/EvilNick2/orpheus/actions/runs: 502")}, key("j"))
 	v := m.View()
-	if l := line(t, v, "orpheus "); !strings.Contains(l, "err") {
-		t.Errorf("sidebar line %q, want err badge", l)
+	if l := sideRow(t, v, "orpheus"); !strings.Contains(l, "? orpheus") {
+		t.Errorf("sidebar row %q, want ?", l)
 	}
 	if !strings.Contains(v, "502") {
 		t.Errorf("error not shown in runs pane:\n%s", v)
@@ -191,7 +224,7 @@ func TestRunsListScrollsToKeepCursorVisible(t *testing.T) {
 		m, _ = send(m, key("j"))
 	}
 	v := ansi.Strip(m.View())
-	if !strings.Contains(v, "#80 ci") || strings.Contains(v, "#100 ci") {
+	if !strings.Contains(v, "#80 ") || strings.Contains(v, "#100 ") {
 		t.Errorf("cursor on #80 not scrolled into view:\n%s", v)
 	}
 	if n := strings.Count(v, "\n") + 1; n > 8 {
@@ -218,7 +251,7 @@ func TestSeedShowsCachedRunsUntilFirstPoll(t *testing.T) {
 
 	m = m.Seed("EvilNick2/dotfiles", dotfilesRuns)
 	v := ansi.Strip(m.View())
-	if !strings.Contains(v, "#16 Manifest check") || !strings.Contains(v, "cached, refreshing") {
+	if !strings.Contains(v, "feat: add wrapper") || !strings.Contains(v, "cached, refreshing") {
 		t.Errorf("seeded view:\n%s", v)
 	}
 	m, _ = send(m, watch.Event{Repo: "EvilNick2/dotfiles", Initial: true, Runs: dotfilesRuns})
@@ -234,10 +267,10 @@ func TestChangesSinceLastSessionAreMarked(t *testing.T) {
 	m, _ = send(m, watch.Event{Repo: "EvilNick2/dotfiles", Initial: true, Runs: dotfilesRuns,
 		Changes: []runs.Change{{Run: dotfilesRuns[0]}}})
 	v := ansi.Strip(m.View())
-	if l := line(t, v, "#16 Manifest check"); !strings.Contains(l, "* #16") {
-		t.Errorf("new run row %q, want * marker", l)
+	if l := runRow(t, v, "#16"); !strings.Contains(l, "new") {
+		t.Errorf("new run row %q, want new tag", l)
 	}
-	if l := line(t, v, "#15 Manifest check"); strings.Contains(l, "*") {
+	if l := runRow(t, v, "#15"); strings.Contains(l, "new") {
 		t.Errorf("unchanged run row %q marked", l)
 	}
 }
@@ -249,7 +282,7 @@ func TestLiveChangesAreNotMarked(t *testing.T) {
 
 	m, _ = send(m, watch.Event{Repo: "EvilNick2/dotfiles", Runs: []runs.Run{done, dotfilesRuns[1]},
 		Changes: []runs.Change{{Prev: &dotfilesRuns[0], Run: done}}})
-	if l := line(t, ansi.Strip(m.View()), "#16 Manifest check"); strings.Contains(l, "*") {
+	if l := runRow(t, m.View(), "#16"); strings.Contains(l, "new") {
 		t.Errorf("live change marked: %q", l)
 	}
 }
@@ -259,11 +292,52 @@ func TestSidebarMarksUnviewedRepoWithChangesUntilVisited(t *testing.T) {
 
 	m, _ = send(m, watch.Event{Repo: "EvilNick2/orpheus", Initial: true, Runs: orpheusRuns,
 		Changes: []runs.Change{{Run: orpheusRuns[0]}}})
-	if l := line(t, ansi.Strip(m.View()), "orpheus"); !strings.Contains(l, "orpheus*") {
-		t.Errorf("sidebar line %q, want orpheus*", l)
+	if l := sideRow(t, m.View(), "orpheus"); !strings.Contains(l, "new") {
+		t.Errorf("sidebar row %q, want new tag", l)
 	}
 	m, _ = send(m, key("j"))
-	if v := ansi.Strip(m.View()); strings.Contains(v, "orpheus*") {
-		t.Errorf("marker kept after visiting:\n%s", v)
+	if l := sideRow(t, m.View(), "orpheus"); strings.Contains(l, "new") {
+		t.Errorf("marker kept after visiting: %q", l)
+	}
+}
+
+func TestTwoBorderedPanesFillTheSize(t *testing.T) {
+	v := ansi.Strip(newModel(t).View())
+
+	lines := strings.Split(v, "\n")
+	if len(lines) != 20 {
+		t.Fatalf("%d lines, want 20", len(lines))
+	}
+	for i, l := range lines {
+		if w := ansi.StringWidth(l); w != 100 {
+			t.Errorf("line %d is %d wide, want 100: %q", i, w, l)
+		}
+	}
+	if !strings.Contains(lines[0], "repos") || !strings.Contains(lines[0], "EvilNick2/dotfiles") {
+		t.Errorf("pane titles missing from %q", lines[0])
+	}
+}
+
+func TestRunRowHasTitleOnSecondLine(t *testing.T) {
+	v := ansi.Strip(newModel(t).View())
+
+	lines := strings.Split(v, "\n")
+	for i, l := range lines {
+		if _, runs := panes(l); strings.Contains(runs, "#15") {
+			if _, next := panes(lines[i+1]); !strings.Contains(next, "docs: setup notes") {
+				t.Errorf("line after #15 is %q, want its title", next)
+			}
+			return
+		}
+	}
+	t.Fatalf("no #15 row in:\n%s", v)
+}
+
+func TestRunWithoutCreationTimeShowsNoAge(t *testing.T) {
+	m := New([]string{"o/r"}, func() time.Time { return now }).SetSize(100, 10)
+	m, _ = send(m, watch.Event{Repo: "o/r", Initial: true, Runs: []runs.Run{{ID: 1, RunNumber: 7, Name: "build", Status: "completed", Conclusion: "success"}}})
+
+	if l := runRow(t, m.View(), "#7"); strings.Contains(l, "ago") {
+		t.Errorf("row %q shows an age for a run with no creation time", l)
 	}
 }

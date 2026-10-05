@@ -11,6 +11,7 @@ import (
 
 	"github.com/EvilNick2/gh-argus/internal/joblog"
 	"github.com/EvilNick2/gh-argus/internal/runs"
+	"github.com/EvilNick2/gh-argus/internal/theme"
 )
 
 var job = runs.Job{ID: 70, Name: "check", Status: "completed", Conclusion: "failure"}
@@ -61,10 +62,18 @@ func typed(s string) []tea.Msg {
 
 func view(m Model) string { return ansi.Strip(m.View()) }
 
+// content is a pane row without its side borders and the one space of
+// padding inside them.
+func content(l string) string {
+	l = strings.TrimPrefix(l, "│ ")
+	l = strings.TrimSuffix(l, "│")
+	return strings.TrimRight(l, " ")
+}
+
 // shows reports whether the exact log line text appears as a row.
 func shows(v, text string) bool {
 	for _, l := range strings.Split(v, "\n") {
-		if strings.TrimRight(l, " ") == text {
+		if content(l) == text {
 			return true
 		}
 	}
@@ -80,9 +89,9 @@ func TestLoadingUntilLogArrives(t *testing.T) {
 }
 
 func TestHeaderNamesRepoAndJob(t *testing.T) {
-	l := strings.Split(view(newModel(numbered(3), 80, 10)), "\n")[0]
+	l := strings.Join(strings.Split(view(newModel(numbered(3), 80, 10)), "\n")[:2], " ")
 
-	for _, want := range []string{"EvilNick2/dotfiles", "check", "fail"} {
+	for _, want := range []string{"EvilNick2/dotfiles", "check", "x failed"} {
 		if !strings.Contains(l, want) {
 			t.Errorf("header %q missing %q", l, want)
 		}
@@ -169,7 +178,7 @@ func TestWrapTogglesLongLines(t *testing.T) {
 	m := newModel([]joblog.Line{{Text: long}, {Text: "after"}}, 40, 10)
 
 	v := view(m)
-	if !strings.Contains(v, strings.Repeat("abcdefghij", 4)) || !strings.Contains(v, "after") {
+	if !strings.Contains(v, strings.Repeat("abcdefghij", 3)) || !strings.Contains(v, "after") {
 		t.Errorf("wrapped view:\n%s", v)
 	}
 	for _, l := range strings.Split(v, "\n") {
@@ -182,10 +191,10 @@ func TestWrapTogglesLongLines(t *testing.T) {
 	v = view(m)
 	rows := 0
 	for _, l := range strings.Split(v, "\n") {
-		if strings.HasPrefix(l, "abcdefghij") {
+		if c := content(l); strings.HasPrefix(c, "abcdefghij") {
 			rows++
-			if !strings.HasSuffix(strings.TrimRight(l, " "), "..") || ansi.StringWidth(l) > 40 {
-				t.Errorf("unwrapped row %q, want truncated to 40 with ..", l)
+			if !strings.HasSuffix(c, "..") || ansi.StringWidth(l) > 40 {
+				t.Errorf("unwrapped row %q, want truncated to the pane with ..", l)
 			}
 		}
 	}
@@ -297,7 +306,38 @@ func TestMatchesAreHighlighted(t *testing.T) {
 	m := newModel(lines, 80, 10)
 	m = send(m, append(append([]tea.Msg{key("/")}, typed("NEEDLE")...), key("enter"))...)
 	raw := m.View()
-	if !strings.Contains(raw, "\x1b[7mneedle") {
-		t.Errorf("match not rendered in reverse video:\n%q", raw)
+	if !strings.Contains(raw, theme.Match().Render("needle")) {
+		t.Errorf("match not highlighted:\n%q", raw)
+	}
+}
+
+func TestLogIsOnePaneOfFullSize(t *testing.T) {
+	lines := strings.Split(view(newModel(numbered(50), 60, 12)), "\n")
+
+	if len(lines) != 12 {
+		t.Fatalf("%d lines, want 12", len(lines))
+	}
+	for i, l := range lines {
+		if w := ansi.StringWidth(l); w != 60 {
+			t.Errorf("line %d is %d wide, want 60: %q", i, w, l)
+		}
+	}
+}
+
+func TestEndStartsOnALineBoundary(t *testing.T) {
+	// Three-row wrapped lines at width 23 (20 inside the pane, less padding).
+	var lines []joblog.Line
+	for i := range 10 {
+		lines = append(lines, joblog.Line{Text: fmt.Sprintf("line%d ", i) + strings.Repeat("x", 45)})
+	}
+	m := newModel(lines, 23, 10) // 7 rows of log fit, so the end falls mid-line
+
+	v := view(m)
+	first := content(strings.Split(v, "\n")[2])
+	if !strings.HasPrefix(first, "line") {
+		t.Errorf("top row %q starts mid-line:\n%s", first, v)
+	}
+	if !strings.Contains(v, "line9") {
+		t.Errorf("last line not shown:\n%s", v)
 	}
 }

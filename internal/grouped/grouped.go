@@ -6,12 +6,14 @@ package grouped
 import (
 	"strings"
 
-	"charm.land/lipgloss/v2"
+	"github.com/EvilNick2/gh-argus/internal/theme"
 )
 
 // View says how to draw a Model.
 type View[T any] struct {
-	Row func(item T, selected bool) string
+	// Title is set into the pane's top border.
+	Title string
+	Row   func(item T, selected bool) string
 	// Empty is shown under a repo that loaded with no items.
 	Empty string
 	// Error renders a failed load. Nil shows the error in red.
@@ -120,45 +122,43 @@ func (m Model[T]) Key(k string) Model[T] {
 	return m
 }
 
-var (
-	boldStyle = lipgloss.NewStyle().Bold(true)
-	dimStyle  = lipgloss.NewStyle().Faint(true)
-	errStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
-)
-
-// Render draws the list, scrolled to keep the cursor visible in the height.
+// Render draws the list in a pane of the model's size, titled v.Title and
+// scrolled to keep the cursor visible. The selected row is highlighted
+// across the pane.
 func (m Model[T]) Render(v View[T]) string {
+	inner := max(1, m.width-2)
 	var rows []string
 	cursorRow, i := 0, 0
 	for _, r := range m.repos {
 		g := m.groups[r]
-		header := boldStyle.Render(r)
+		header := " " + theme.Bold().Render(r)
 		if v.Header != nil && g.loaded {
 			if extra := v.Header(r, g.items); extra != "" {
-				header += "  " + dimStyle.Render(extra)
+				header += "  " + theme.Muted().Render(extra)
 			}
 		}
 		rows = append(rows, header)
 		switch {
 		case g.err != nil && v.Error != nil:
-			rows = append(rows, "  "+v.Error(g.err))
+			rows = append(rows, "   "+v.Error(g.err))
 		case g.err != nil:
-			rows = append(rows, "  "+errStyle.Render(g.err.Error()))
+			rows = append(rows, "   "+theme.Fail().Render(g.err.Error()))
 		case !g.loaded:
-			rows = append(rows, dimStyle.Render("  loading"))
+			rows = append(rows, theme.Muted().Render("   loading"))
 		case len(g.items) == 0:
-			rows = append(rows, dimStyle.Render("  "+v.Empty))
+			rows = append(rows, theme.Muted().Render("   "+v.Empty))
 		}
 		for _, it := range g.items {
+			row := v.Row(it, i == m.cursor)
 			if i == m.cursor {
-				cursorRow = len(rows)
+				cursorRow, row = len(rows), theme.Selected(row, inner)
 			}
-			rows = append(rows, v.Row(it, i == m.cursor))
+			rows = append(rows, row)
 			i++
 		}
 	}
 
-	h := max(1, m.height)
+	h := max(1, m.height-2)
 	offset := 0
 	if cursorRow >= h {
 		offset = cursorRow - h + 1
@@ -168,7 +168,8 @@ func (m Model[T]) Render(v View[T]) string {
 	if i > 0 && m.cursor == i-1 {
 		offset = min(cursorRow, max(offset, len(rows)-h))
 	}
-	return strings.Join(rows[offset:min(len(rows), offset+h)], "\n")
+	rows = rows[offset:min(len(rows), offset+h)]
+	return theme.Pane(v.Title, strings.Join(rows, "\n"), m.width, m.height, true)
 }
 
 // All returns every loaded item in display order.

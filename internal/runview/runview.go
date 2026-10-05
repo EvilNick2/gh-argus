@@ -8,10 +8,10 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
-	"github.com/EvilNick2/gh-argus/internal/badge"
 	"github.com/EvilNick2/gh-argus/internal/runs"
+	"github.com/EvilNick2/gh-argus/internal/theme"
 	"github.com/EvilNick2/gh-argus/internal/timefmt"
 	"github.com/EvilNick2/gh-argus/internal/watch"
 )
@@ -115,73 +115,67 @@ func (m Model) elapsed(start, end time.Time) string {
 	return timefmt.Duration(end.Sub(start))
 }
 
-var (
-	boldStyle   = lipgloss.NewStyle().Bold(true)
-	dimStyle    = lipgloss.NewStyle().Faint(true)
-	cursorStyle = lipgloss.NewStyle().Reverse(true)
-	errStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
-)
-
-func pad(s string, n int) string {
-	return s + strings.Repeat(" ", max(0, n-lipgloss.Width(s)))
-}
-
 func (m Model) View() string {
 	r := m.run
-	header := boldStyle.Render(fmt.Sprintf("%s #%d %s", m.repo, r.RunNumber, r.Name)) +
-		"  " + badge.Render(badge.Word(r.Status, r.Conclusion)) + "  " + dimStyle.Render(r.HeadBranch)
+	inner := max(10, m.width-2)
+	state := " " + theme.Icon(r.Status, r.Conclusion) + " " + theme.Text().Render(theme.StateWord(r.Status, r.Conclusion)) +
+		"  " + theme.Accent().UnsetBold().Render(r.HeadBranch)
 	if r.RunAttempt > 1 {
-		header += dimStyle.Render(fmt.Sprintf("  attempt %d", r.RunAttempt))
+		state += theme.Muted().Render(fmt.Sprintf("  attempt %d", r.RunAttempt))
 	}
-	second := ""
 	if m.err != nil {
-		second = errStyle.Render(m.err.Error())
+		state += "  " + theme.Fail().Render(m.err.Error())
 	}
 
 	nameW := 10
 	for _, j := range m.jobs {
-		nameW = max(nameW, lipgloss.Width(j.Name))
+		nameW = max(nameW, ansi.StringWidth(j.Name))
 	}
 	if len(m.jobs) > 0 {
 		for _, s := range m.jobs[m.cursor].Steps {
-			nameW = max(nameW, lipgloss.Width(s.Name)+5)
+			nameW = max(nameW, ansi.StringWidth(s.Name)+5)
 		}
 	}
-	nameW = min(nameW, max(10, m.width-16))
+	nameW = min(nameW, max(10, inner-16))
 
 	var body []string
 	cursorLine, steps := 0, 0
 	if !m.loaded {
-		body = append(body, dimStyle.Render("loading jobs"))
+		body = append(body, theme.Muted().Render(" loading jobs"))
 	} else if len(m.jobs) == 0 {
-		body = append(body, dimStyle.Render("no jobs yet"))
+		body = append(body, theme.Muted().Render(" no jobs yet"))
 	}
 	for i, j := range m.jobs {
-		name := pad(j.Name, nameW)
+		row := " " + theme.Icon(j.Status, j.Conclusion) + " " + theme.Bold().Render(pad(j.Name, nameW)) + "  " +
+			theme.Muted().Render(m.elapsed(j.StartedAt, j.CompletedAt))
 		if i == m.cursor {
-			name = cursorStyle.Render(name)
-			cursorLine = len(body)
+			row, cursorLine = theme.Selected(row, inner), len(body)
 		}
-		body = append(body, badge.Render(badge.Word(j.Status, j.Conclusion))+" "+name+"  "+
-			dimStyle.Render(m.elapsed(j.StartedAt, j.CompletedAt)))
+		body = append(body, row)
 		if i != m.cursor {
 			continue
 		}
 		steps = len(j.Steps)
 		for _, s := range j.Steps {
-			label := pad(fmt.Sprintf("  %2d %s", s.Number, s.Name), nameW)
-			body = append(body, "     "+label+"  "+badge.Render(badge.Word(s.Status, s.Conclusion))+"  "+
-				dimStyle.Render(m.elapsed(s.StartedAt, s.CompletedAt)))
+			label := pad(fmt.Sprintf("%2d %s", s.Number, s.Name), nameW-2)
+			body = append(body, "     "+theme.Icon(s.Status, s.Conclusion)+" "+theme.Text().Render(label)+"  "+
+				theme.Muted().Render(m.elapsed(s.StartedAt, s.CompletedAt)))
 		}
 	}
 
-	// Scroll so the cursor job is visible, with as many of its steps as fit.
-	rows := max(1, m.height-2)
+	// Scroll so the cursor job is visible, with as many of its steps as fit
+	// below the state line and a blank line.
+	rows := max(1, m.height-4)
 	offset := 0
 	if last := cursorLine + steps; last >= rows {
 		offset = min(cursorLine, last-rows+1)
 	}
 	body = body[offset:min(len(body), offset+rows)]
 
-	return strings.Join(append([]string{header, second}, body...), "\n")
+	title := fmt.Sprintf("%s  #%d %s", m.repo, r.RunNumber, r.Name)
+	return theme.Pane(title, strings.Join(append([]string{state, ""}, body...), "\n"), m.width, m.height, true)
+}
+
+func pad(s string, n int) string {
+	return s + strings.Repeat(" ", max(0, n-ansi.StringWidth(s)))
 }

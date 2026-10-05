@@ -121,6 +121,7 @@ func run() error {
 		},
 		SaveSelection: func(rs []string) error { return st.Save("selection", rs) },
 		Seed:          snaps.Seed,
+		Remaining:     w.Fetcher.Remaining,
 		ListWorkflows: func(ctx context.Context, repo string) ([]workflows.Workflow, error) {
 			res, err := w.Fetcher.Get(ctx, "/repos/"+repo+"/actions/workflows?per_page=100")
 			if err != nil {

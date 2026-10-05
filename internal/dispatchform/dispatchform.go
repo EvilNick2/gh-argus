@@ -9,9 +9,9 @@ import (
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/EvilNick2/gh-argus/internal/theme"
 	"github.com/EvilNick2/gh-argus/internal/workflows"
 )
 
@@ -166,17 +166,13 @@ func (m Model) submit() (Model, tea.Cmd) {
 	return m, func() tea.Msg { return SubmitMsg{Ref: ref, Inputs: inputs} }
 }
 
-var (
-	boldStyle   = lipgloss.NewStyle().Bold(true)
-	dimStyle    = lipgloss.NewStyle().Faint(true)
-	errStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
-	cursorStyle = lipgloss.NewStyle().Reverse(true)
-)
-
 func (m Model) View() string {
-	lines := []string{
-		boldStyle.Render(fmt.Sprintf("run %s on %s", m.wf.Name, m.fields[0].value)) + "  " + dimStyle.Render(m.repo),
-		errStyle.Render(m.err),
+	inner := max(10, m.width-2)
+	lines := []string{" " + theme.Muted().Render(m.repo)}
+	if m.err != "" {
+		lines = append(lines, " "+theme.Fail().Render(m.err))
+	} else {
+		lines = append(lines, "")
 	}
 	nameW := 0
 	for _, f := range m.fields {
@@ -194,33 +190,34 @@ func (m Model) View() string {
 		case "boolean":
 			box := "[ ]"
 			if f.value == "true" {
-				box = "[x]"
+				box = theme.Accent().UnsetBold().Render("[x]")
 			}
 			value = box + " " + f.value
 		case "choice":
-			value = "< " + f.value + " >"
+			value = theme.Muted().Render("< ") + f.value + theme.Muted().Render(" >")
 		default:
 			value = f.value
 			if i == m.cursor {
-				value += "_"
+				value += theme.Accent().Render("_")
 			}
 			if f.in.Type == branchType && i == m.cursor && len(m.branches) > 0 {
-				value += dimStyle.Render(fmt.Sprintf("  left/right picks from %d branches", len(m.branches)))
+				value += theme.Muted().Render(fmt.Sprintf("  left/right picks from %d branches", len(m.branches)))
 			}
 		}
-		marker := "  "
+		row := " " + theme.Bold().Render(name) + "  " + theme.Text().Render(value)
 		if i == m.cursor {
-			marker, name = "> ", cursorStyle.Render(name)
+			row = theme.Selected(row, inner)
 		}
-		lines = append(lines, marker+name+"  "+value)
+		lines = append(lines, row)
 		if f.in.Description != "" {
-			for _, d := range strings.Split(ansi.Wordwrap(f.in.Description, max(10, m.width-4), " "), "\n") {
-				lines = append(lines, "    "+dimStyle.Render(d))
+			for _, d := range strings.Split(ansi.Wordwrap(f.in.Description, max(10, inner-4), " "), "\n") {
+				lines = append(lines, "   "+theme.Muted().Render(d))
 			}
 		}
 	}
 	if len(m.fields) == 1 {
-		lines = append(lines, "", dimStyle.Render("no inputs"))
+		lines = append(lines, "", " "+theme.Muted().Render("no inputs"))
 	}
-	return strings.Join(lines, "\n")
+	title := fmt.Sprintf("run %s on %s", m.wf.Name, m.fields[0].value)
+	return theme.Pane(title, strings.Join(lines, "\n"), m.width, m.height, true)
 }

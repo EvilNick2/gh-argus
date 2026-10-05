@@ -8,10 +8,10 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
-	"github.com/EvilNick2/gh-argus/internal/badge"
 	"github.com/EvilNick2/gh-argus/internal/runs"
+	"github.com/EvilNick2/gh-argus/internal/theme"
 	"github.com/EvilNick2/gh-argus/internal/timefmt"
 	"github.com/EvilNick2/gh-argus/internal/watch"
 )
@@ -87,9 +87,10 @@ func (m Model) Current() (string, runs.Run, bool) {
 	return m.repos[m.repoIdx], st.runs[m.runIdx], true
 }
 
-// rows is how many run rows fit below the pane's header and error lines.
+// rows is how many two-line runs fit in the runs pane, inside its border
+// and below its status line.
 func (m Model) rows() int {
-	return max(1, m.height-2)
+	return max(1, (m.height-3)/2)
 }
 
 func (m *Model) clamp() {
@@ -189,41 +190,26 @@ func (m *Model) move(d int) {
 	m.clamp()
 }
 
-var (
-	dimStyle    = lipgloss.NewStyle().Faint(true)
-	boldStyle   = lipgloss.NewStyle().Bold(true)
-	cursorStyle = lipgloss.NewStyle().Reverse(true)
-	errStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
-)
-
-func repoBadge(st *repoState) string {
+// repoIcon is the sidebar icon: ? when the last poll failed, * while any
+// run is active, otherwise the state of the latest run.
+func repoIcon(st *repoState) string {
 	switch {
 	case st.err != nil:
-		return "err"
+		return theme.Fail().Render("?")
 	case runs.Active(st.runs):
-		return "run"
+		return theme.Gold().Render("*")
 	case len(st.runs) > 0:
-		return badge.Word(st.runs[0].Status, st.runs[0].Conclusion)
+		return theme.Icon(st.runs[0].Status, st.runs[0].Conclusion)
 	}
-	return ""
+	return " "
 }
 
 func truncate(s string, n int) string {
-	r := []rune(s)
-	if n <= 0 {
-		return ""
-	}
-	if len(r) <= n {
-		return s
-	}
-	if n <= 2 {
-		return string(r[:n])
-	}
-	return string(r[:n-2]) + ".."
+	return ansi.Truncate(s, max(0, n), "..")
 }
 
 func pad(s string, n int) string {
-	return s + strings.Repeat(" ", max(0, n-lipgloss.Width(s)))
+	return s + strings.Repeat(" ", max(0, n-ansi.StringWidth(s)))
 }
 
 func shortName(full string) string {
@@ -231,82 +217,86 @@ func shortName(full string) string {
 	return name
 }
 
+// newTag marks something that changed since the last session.
+func newTag() string {
+	return theme.Gold().Render("new")
+}
+
 func (m Model) View() string {
 	nameW := 8
 	for _, r := range m.repos {
-		nameW = max(nameW, len([]rune(shortName(r))))
+		nameW = max(nameW, ansi.StringWidth(shortName(r)))
 	}
 	nameW = min(nameW, 24)
-	sideW := 5 + nameW
+	// " " icon " " name "  new "
+	sideInner := nameW + 8
+	sideW := sideInner + 2
+	runsW := max(20, m.width-sideW)
+	runsInner := runsW - 2
 
 	var side []string
 	for i, r := range m.repos {
-		label := shortName(r)
-		if m.state[r].unseen {
-			label += "*"
+		st := m.state[r]
+		tag := "   "
+		if st.unseen {
+			tag = newTag()
 		}
-		name := pad(truncate(label, nameW), nameW)
+		row := " " + repoIcon(st) + " " + pad(truncate(shortName(r), nameW), nameW) + "  " + tag + " "
 		if i == m.repoIdx {
-			if m.focusRuns {
-				name = boldStyle.Render(name)
-			} else {
-				name = cursorStyle.Render(name)
-			}
+			row = theme.Selected(row, sideInner)
 		}
-		side = append(side, badge.Render(repoBadge(m.state[r]))+" "+name)
+		side = append(side, row)
 	}
 
-	paneW := max(10, m.width-sideW-3)
-	var pane []string
-	if len(m.repos) > 0 {
-		pane = append(pane, boldStyle.Render(m.repos[m.repoIdx]))
-	}
 	st := m.current()
+	var body []string
 	switch {
 	case st.err != nil:
-		pane = append(pane, errStyle.Render(truncate(st.err.Error(), paneW)))
+		body = append(body, " "+theme.Fail().Render(st.err.Error()))
 	case st.cached:
-		pane = append(pane, dimStyle.Render("cached, refreshing"))
+		body = append(body, " "+theme.Muted().Render("cached, refreshing"))
+	case !st.seen:
+		body = append(body, " "+theme.Muted().Render("waiting for first poll"))
+	case len(st.runs) == 0:
+		body = append(body, " "+theme.Muted().Render("no runs"))
 	default:
-		pane = append(pane, "")
-	}
-	switch {
-	case !st.seen && st.err == nil:
-		pane = append(pane, dimStyle.Render("waiting for first poll"))
-	case st.seen && len(st.runs) == 0:
-		pane = append(pane, dimStyle.Render("no runs"))
+		body = append(body, " "+theme.Muted().Render(fmt.Sprintf("%d recent runs", len(st.runs))))
 	}
 	end := min(len(st.runs), m.runOffset+m.rows())
 	for i := m.runOffset; i < end; i++ {
 		r := st.runs[i]
-		tail := "  " + r.HeadBranch + "  " + fmt.Sprintf("%3s", timefmt.Age(m.now().Sub(r.CreatedAt)))
-		title := fmt.Sprintf("#%d %s", r.RunNumber, r.Name)
+		meta := "  " + r.Name
+		if !r.CreatedAt.IsZero() {
+			meta = "  " + timefmt.Age(m.now().Sub(r.CreatedAt)) + " ago" + meta
+		}
+		first := " " + theme.Icon(r.Status, r.Conclusion) + " " + theme.Bold().Render(fmt.Sprintf("#%d", r.RunNumber)) +
+			" " + theme.Accent().UnsetBold().Render(r.HeadBranch) + theme.Muted().Render(meta)
+		if r.RunAttempt > 1 {
+			first += theme.Muted().Render(fmt.Sprintf("  attempt %d", r.RunAttempt))
+		}
 		if st.fresh[r.ID] {
-			title = "* " + title
+			first += "  " + newTag()
 		}
-		title = pad(truncate(title, paneW-5-len([]rune(tail))), paneW-5-len([]rune(tail)))
-		if m.focusRuns && i == m.runIdx {
-			title = cursorStyle.Render(title)
+		title := r.DisplayTitle
+		if title == "" {
+			title = r.Name
 		}
-		pane = append(pane, badge.Render(badge.Word(r.Status, r.Conclusion))+" "+title+dimStyle.Render(tail))
+		second := "   " + theme.Text().Render(truncate(title, runsInner-4))
+		if i == m.runIdx {
+			first, second = theme.Selected(first, runsInner), theme.Selected(second, runsInner)
+		}
+		body = append(body, first, second)
 	}
 
-	var b strings.Builder
-	for i := range max(m.height, len(side), len(pane)) {
-		if i >= m.height && m.height > 0 {
-			break
-		}
-		l, r := "", ""
-		if i < len(side) {
-			l = side[i]
-		}
-		if i < len(pane) {
-			r = pane[i]
-		}
-		if i > 0 {
-			b.WriteString("\n")
-		}
-		b.WriteString(pad(l, sideW) + dimStyle.Render(" | ") + r)
+	title := ""
+	if len(m.repos) > 0 {
+		title = m.repos[m.repoIdx]
 	}
-	return b.String()
+	left := strings.Split(theme.Pane("repos", strings.Join(side, "\n"), sideW, m.height, !m.focusRuns), "\n")
+	right := strings.Split(theme.Pane(title, strings.Join(body, "\n"), runsW, m.height, m.focusRuns), "\n")
+	out := make([]string, len(left))
+	for i := range left {
+		out[i] = left[i] + right[i]
+	}
+	return strings.Join(out, "\n")
 }

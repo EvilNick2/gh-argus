@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 type Fetcher struct {
@@ -20,6 +21,8 @@ type Fetcher struct {
 
 	mu    sync.Mutex
 	cache map[string]entry
+
+	remaining atomic.Int64
 }
 
 type entry struct {
@@ -60,11 +63,13 @@ func (e *StatusError) Error() string {
 }
 
 func New(client *http.Client, baseURL string) *Fetcher {
-	return &Fetcher{
+	f := &Fetcher{
 		client:  client,
 		baseURL: strings.TrimSuffix(baseURL, "/"),
 		cache:   map[string]entry{},
 	}
+	f.remaining.Store(-1)
+	return f
 }
 
 func (f *Fetcher) Get(ctx context.Context, path string) (Result, error) {
@@ -92,6 +97,7 @@ func (f *Fetcher) Get(ctx context.Context, path string) (Result, error) {
 	res := Result{RateRemaining: -1}
 	if v, err := strconv.Atoi(resp.Header.Get("X-RateLimit-Remaining")); err == nil {
 		res.RateRemaining = v
+		f.remaining.Store(int64(v))
 	}
 
 	switch {
@@ -108,4 +114,10 @@ func (f *Fetcher) Get(ctx context.Context, path string) (Result, error) {
 		return Result{}, &StatusError{StatusCode: resp.StatusCode, Path: path, Body: string(body)}
 	}
 	return res, nil
+}
+
+// Remaining is X-RateLimit-Remaining from the latest response that carried
+// it, or -1 before any did.
+func (f *Fetcher) Remaining() int {
+	return int(f.remaining.Load())
 }

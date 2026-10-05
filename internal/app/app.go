@@ -9,7 +9,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/EvilNick2/gh-argus/internal/actions"
 	"github.com/EvilNick2/gh-argus/internal/caches"
@@ -24,6 +24,7 @@ import (
 	"github.com/EvilNick2/gh-argus/internal/runs"
 	"github.com/EvilNick2/gh-argus/internal/runsview"
 	"github.com/EvilNick2/gh-argus/internal/runview"
+	"github.com/EvilNick2/gh-argus/internal/theme"
 	"github.com/EvilNick2/gh-argus/internal/watch"
 	"github.com/EvilNick2/gh-argus/internal/workflows"
 	"github.com/EvilNick2/gh-argus/internal/workflowsview"
@@ -42,6 +43,8 @@ type Deps struct {
 	SaveSelection func(repos []string) error
 	// Seed returns runs saved by an earlier session, or nil.
 	Seed func(repo string) *watch.Seed
+	// Remaining is the REST requests left this hour, or -1 before the first.
+	Remaining func() int
 	// ListWorkflows fetches the workflows of a repo.
 	ListWorkflows func(ctx context.Context, repo string) ([]workflows.Workflow, error)
 	// DispatchSpec returns the ref to dispatch on, normally the default
@@ -189,6 +192,7 @@ type Model struct {
 	logRep   string
 
 	confirm  *pending
+	help     bool
 	flash    string
 	flashErr bool
 
@@ -344,29 +348,33 @@ func (m Model) wait() tea.Cmd {
 	}
 }
 
-// Lines around the tab body: tab bar and a blank line above, help below.
+// Lines around the tab body: header bar and tab line above, status bar below.
 const chromeLines = 3
 
 func (m Model) bodyHeight() int {
 	return max(1, m.height-chromeLines)
 }
 
-// runHeight leaves the run screen one line for help.
+// runHeight leaves the run, log and form screens the header and status bars.
 func (m Model) runHeight() int {
-	return max(1, m.height-1)
+	return max(1, m.height-2)
 }
 
 // Init always runs the picker's init, its repo list refresh, so the list is
 // current if the picker is opened later with p.
 func (m Model) Init() tea.Cmd {
 	if m.screen == screenTabs {
-		return tea.Batch(m.wait(), m.picker.Init())
+		return tea.Batch(m.wait(), m.picker.Init(), tea.RequestBackgroundColor)
 	}
-	return m.picker.Init()
+	return tea.Batch(m.picker.Init(), tea.RequestBackgroundColor)
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.BackgroundColorMsg:
+		theme.SetDark(msg.IsDark())
+		return m, nil
+
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.runs = m.runs.SetSize(m.width, m.bodyHeight())
@@ -496,6 +504,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.flash, m.flashErr = "", false
 		if m.confirm != nil {
 			return m.answer(msg)
+		}
+		if m.help {
+			switch msg.String() {
+			case "q":
+				return m, m.quit()
+			case "?", "esc":
+				m.help = false
+			}
+			return m, nil
+		}
+		if msg.String() == "?" && m.helpAvailable() {
+			m.help = true
+			return m, nil
 		}
 		if kind, ok := actionKeys[msg.String()]; ok && (m.screen == screenRun || m.screen == screenTabs && m.tab == 0) {
 			return m.ask(kind), nil
@@ -737,77 +758,133 @@ func (m Model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-var (
-	activeTab = lipgloss.NewStyle().Bold(true).Reverse(true)
-	dimStyle  = lipgloss.NewStyle().Faint(true)
-	errStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
-)
-
 func (m Model) View() tea.View {
 	switch m.screen {
 	case screenPicker:
 		return m.picker.View()
 	case screenRun:
-		return screenView(m.run.View(), m.runHeight(), m.footer("j/k job  enter log  r/R rerun  c cancel  esc back  q quit"))
+		return m.frame(m.run.View(), false, m.runHeight(), "j/k job  enter log  r/R rerun  c cancel  esc back  ? keys  q quit")
 	case screenForm:
-		return screenView(m.form.View(), m.runHeight(), m.footer("tab next  left/right branch or choice  space toggle  enter run  esc cancel"))
+		return m.frame(m.form.View(), false, m.runHeight(), "tab next  left/right pick  space toggle  enter run  esc cancel")
 	case screenLog:
-		return screenView(m.log.View(), m.runHeight(), m.footer("j/k scroll  / search  n/N match  w wrap  r reload  esc back  q quit"))
-	}
-
-	var bar []string
-	for i, t := range tabs {
-		label := fmt.Sprintf(" %d %s ", i+1, t)
-		if i == m.tab {
-			label = activeTab.Render(label)
-		}
-		bar = append(bar, label)
-	}
-	top := strings.Join(bar, " ")
-	if m.err != nil {
-		top += "  " + errStyle.Render(m.err.Error())
+		return m.frame(m.log.View(), false, m.runHeight(), "/ search  n/N match  w wrap  r reload  esc back  ? keys  q quit")
 	}
 
 	body := m.runs.View()
-	help := "tab pane  enter open  r/R rerun  c cancel  1-5 tabs  p repos  q quit"
+	help := "tab pane  enter open  r/R rerun  c cancel  p repos  ? keys  q quit"
 	switch m.tab {
-	case 0:
 	case 1:
 		body = m.wfs.View()
-		help = "j/k move  enter run  i branch and inputs  e enable  d disable  1-5 tabs  p repos  q quit"
+		help = "enter run  i branch/inputs  e/d enable/disable  p repos  ? keys  q quit"
 	case 2:
 		body = m.mets.View()
-		help = "j/k move  1-5 tabs  p repos  q quit"
+		help = "j/k move  p repos  ? keys  q quit"
 	case 3:
 		body = m.cchs.View()
-		help = "j/k move  d delete  1-5 tabs  p repos  q quit"
+		help = "d delete  p repos  ? keys  q quit"
 	case 4:
 		body = m.rnrs.View()
-		help = "j/k move  1-5 tabs  p repos  q quit"
+		help = "j/k move  p repos  ? keys  q quit"
 	}
-	return screenView(top+"\n\n"+body, m.height-1, m.footer(help))
+	return m.frame(body, true, m.bodyHeight(), help)
 }
 
-// footer is the bottom line: a pending prompt, else a message, else help.
-func (m Model) footer(help string) string {
-	switch {
-	case m.confirm != nil:
-		return m.confirm.prompt + "? y/n"
-	case m.flashErr:
-		return errStyle.Render(m.flash)
-	case m.flash != "":
-		return m.flash
+// helpAvailable reports a screen where ? opens the key reference rather than
+// being typed.
+func (m Model) helpAvailable() bool {
+	switch m.screen {
+	case screenTabs, screenRun:
+		return true
+	case screenLog:
+		return !m.log.Searching()
 	}
-	return dimStyle.Render(help)
+	return false
 }
 
-// screenView pads content to height lines and puts the footer below.
-func screenView(content string, height int, footer string) tea.View {
-	lines := strings.Split(content, "\n")
-	for len(lines) < height {
-		lines = append(lines, "")
+// frame draws a screen: the header bar, the tab line on tab screens, body
+// padded to height, and the status bar.
+func (m Model) frame(body string, withTabs bool, height int, help string) tea.View {
+	n := len(m.repos)
+	watching := fmt.Sprintf("watching %d repos", n)
+	if n == 1 {
+		watching = "watching 1 repo"
 	}
-	v := tea.NewView(strings.Join(lines, "\n") + "\n" + footer)
+	lines := []string{theme.Bar(theme.Accent().Render(" argus")+theme.Muted().Render("  "+watching), m.requestsLeft(), m.width)}
+	if withTabs {
+		var tabLine []string
+		for i, t := range tabs {
+			label := fmt.Sprintf("[%d] %s", i+1, t)
+			if i == m.tab {
+				label = theme.Accent().Render(label)
+			} else {
+				label = theme.Muted().Render(label)
+			}
+			tabLine = append(tabLine, label)
+		}
+		line := " " + strings.Join(tabLine, "   ")
+		if m.err != nil {
+			line += "   " + theme.Fail().Render(m.err.Error())
+		}
+		lines = append(lines, line)
+	}
+	if m.help {
+		body = helpView(m.width, height)
+		help = "? or esc close  q quit"
+	}
+	content := strings.Split(body, "\n")
+	for len(content) < height {
+		content = append(content, "")
+	}
+	lines = append(lines, content[:height]...)
+	lines = append(lines, m.statusBar(help, withTabs && m.tab == 0))
+
+	v := tea.NewView(strings.Join(lines, "\n"))
 	v.AltScreen = true
 	return v
+}
+
+// requestsLeft shows the REST requests left this hour, gold under 500 and
+// red under 100, or nothing before the first response.
+func (m Model) requestsLeft() string {
+	if m.deps.Remaining == nil {
+		return ""
+	}
+	n := m.deps.Remaining()
+	if n < 0 {
+		return ""
+	}
+	style := theme.Muted()
+	switch {
+	case n < 100:
+		style = theme.Fail()
+	case n < 500:
+		style = theme.Gold()
+	}
+	return style.Render(fmt.Sprintf("%d requests left ", n))
+}
+
+// statusBar shows a pending prompt, else a message, on the left, and the key
+// hints on the right, with the icon legend on the Runs tab.
+func (m Model) statusBar(help string, legend bool) string {
+	var left string
+	switch {
+	case m.confirm != nil:
+		left = theme.Gold().Bold(true).Render(" " + m.confirm.prompt + "? y/n")
+		help = "y confirm  any other key cancels"
+		legend = false
+	case m.flashErr:
+		left = theme.Fail().Render(" " + m.flash)
+	case m.flash != "":
+		left = theme.Text().Render(" " + m.flash)
+	}
+	// The legend goes first when space runs out, then the hints are cut.
+	right := theme.Muted().Render(help + " ")
+	withLegend := theme.Legend() + theme.Muted().Render("   ") + right
+	if legend && ansi.StringWidth(left)+ansi.StringWidth(withLegend) < m.width {
+		right = withLegend
+	}
+	if room := m.width - ansi.StringWidth(left) - 1; ansi.StringWidth(right) > room {
+		right = ansi.Truncate(right, max(0, room), "")
+	}
+	return theme.Bar(left, right, m.width)
 }

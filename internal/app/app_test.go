@@ -3,12 +3,14 @@ package app
 import (
 	"context"
 	"fmt"
+	"image/color"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/EvilNick2/gh-argus/internal/actions"
@@ -21,6 +23,7 @@ import (
 	"github.com/EvilNick2/gh-argus/internal/runs"
 	"github.com/EvilNick2/gh-argus/internal/runsview"
 	"github.com/EvilNick2/gh-argus/internal/runview"
+	"github.com/EvilNick2/gh-argus/internal/theme"
 	"github.com/EvilNick2/gh-argus/internal/watch"
 	"github.com/EvilNick2/gh-argus/internal/workflows"
 )
@@ -42,7 +45,8 @@ type fakeWatch struct {
 	acts   []string
 	actErr error
 
-	seeds map[string]*watch.Seed
+	seeds     map[string]*watch.Seed
+	remaining int
 
 	wfCalls []string
 	wfs     map[string][]workflows.Workflow
@@ -89,7 +93,8 @@ func (f *fakeWatch) deps() Deps {
 			f.acts = append(f.acts, fmt.Sprintf("%s/%d %v", repo, id, k))
 			return f.actErr
 		},
-		Seed: func(repo string) *watch.Seed { return f.seeds[repo] },
+		Seed:      func(repo string) *watch.Seed { return f.seeds[repo] },
+		Remaining: func() int { return f.remaining },
 		ListWorkflows: func(ctx context.Context, repo string) ([]workflows.Workflow, error) {
 			f.wfCalls = append(f.wfCalls, repo)
 			return f.wfs[repo], nil
@@ -232,9 +237,14 @@ func TestWatchEventsReachRunsTab(t *testing.T) {
 	f.chans[0] <- watch.Event{Repo: "o/r", Initial: true, Runs: []runs.Run{
 		{ID: 1, RunNumber: 7, Name: "build", Status: "completed", Conclusion: "success"},
 	}}
-	msg := m.Init()()
+	var msg tea.Msg
+	for _, cmd := range m.Init()().(tea.BatchMsg) {
+		if got, ok := cmd().(eventMsg); ok {
+			msg = got
+		}
+	}
 	m, next := step(m, msg)
-	if v := view(m); !strings.Contains(v, "#7 build") {
+	if v := view(m); !strings.Contains(v, "+ #7") || !strings.Contains(v, "build") {
 		t.Errorf("event not shown:\n%s", v)
 	}
 	if next == nil {
@@ -355,7 +365,7 @@ func TestOpenRunWatchesItsJobsAndShowsRunScreen(t *testing.T) {
 		t.Errorf("run watch calls %v", f.runCalls)
 	}
 	v := view(m)
-	if !strings.Contains(v, "o/r #7 build") || !strings.Contains(v, "loading jobs") {
+	if !strings.Contains(v, "o/r  #7 build") || !strings.Contains(v, "loading jobs") {
 		t.Errorf("run screen:\n%s", v)
 	}
 	if cmd == nil {
@@ -383,7 +393,7 @@ func TestEscLeavesRunScreenAndStopsJobWatch(t *testing.T) {
 
 	m, cmd := step(m, keyMsg("esc"))
 	m, _ = step(m, cmd())
-	if v := view(m); !strings.Contains(v, "1 Runs") || strings.Contains(v, "loading jobs") {
+	if v := view(m); !strings.Contains(v, "[1] Runs") || strings.Contains(v, "loading jobs") {
 		t.Errorf("not back on tabs:\n%s", v)
 	}
 	if f.runCtxs[0].Err() == nil {
@@ -402,8 +412,8 @@ func TestRepoWatchUpdatesOpenRunHeader(t *testing.T) {
 
 	f.chans[0] <- watch.Event{Repo: "o/r", Runs: []runs.Run{done}, Changes: []runs.Change{{Prev: &openRun, Run: done}}}
 	m, _ = step(m, m.wait()())
-	if l := strings.Split(view(m), "\n")[0]; !strings.Contains(l, "fail") {
-		t.Errorf("run header %q, want fail", l)
+	if l := strings.Split(view(m), "\n")[2]; !strings.Contains(l, "x failed") {
+		t.Errorf("run state line %q, want x failed", l)
 	}
 }
 
@@ -474,7 +484,7 @@ func TestEscFromLogReturnsToRunScreen(t *testing.T) {
 
 	m, cmd := step(m, keyMsg("esc"))
 	m, _ = step(m, cmd())
-	if v := view(m); !strings.Contains(v, "o/r #7 build") || strings.Contains(v, "loading log") {
+	if v := view(m); !strings.Contains(v, "o/r  #7 build") || strings.Contains(v, "loading log") {
 		t.Errorf("not back on run screen:\n%s", v)
 	}
 	if f.runCtxs[0].Err() != nil {
@@ -657,7 +667,7 @@ func TestSavedRunsShowBeforeFirstPoll(t *testing.T) {
 	m := sized(New(f.deps(), newPicker(), []string{"o/r"}))
 
 	v := view(m)
-	if !strings.Contains(v, "#41 release") || !strings.Contains(v, "cached, refreshing") {
+	if !strings.Contains(v, "+ #41") || !strings.Contains(v, "cached, refreshing") {
 		t.Errorf("saved runs not shown at start:\n%s", v)
 	}
 }
@@ -837,7 +847,7 @@ func TestRequiredInputOpensFormAndSubmitDispatches(t *testing.T) {
 		t.Errorf("dispatches %v", f.dispatches)
 	}
 	v := view(m)
-	if !strings.Contains(v, "dispatched Release on main") || !strings.Contains(v, "2 Workflows") {
+	if !strings.Contains(v, "dispatched Release on main") || !strings.Contains(v, "[2] Workflows") {
 		t.Errorf("not back on the tab with a confirmation:\n%s", v)
 	}
 }
@@ -878,7 +888,7 @@ func TestEscClosesFormWithoutDispatching(t *testing.T) {
 
 	m, cmd := step(m, tea.KeyPressMsg{Code: tea.KeyEscape})
 	m = runAll(m, cmd)
-	if v := view(m); !strings.Contains(v, "2 Workflows") || strings.Contains(v, "version*") {
+	if v := view(m); !strings.Contains(v, "[2] Workflows") || strings.Contains(v, "version*") {
 		t.Errorf("form not closed:\n%s", v)
 	}
 	if len(f.dispatches) != 0 {
@@ -978,5 +988,125 @@ func TestDOnEmptyCacheTabDoesNothing(t *testing.T) {
 	m, _ = step(m, keyMsg("d"))
 	if v := view(m); strings.Contains(v, "y/n") || !strings.Contains(v, "no caches") {
 		t.Errorf("view:\n%s", v)
+	}
+}
+
+func TestChromeHeaderTabsAndStatusBar(t *testing.T) {
+	f := &fakeWatch{}
+	m := sized(New(f.deps(), newPicker(), []string{"o/a", "o/b"}))
+
+	lines := strings.Split(view(m), "\n")
+	if len(lines) != 20 {
+		t.Fatalf("view is %d lines, want the full height of 20", len(lines))
+	}
+	if !strings.Contains(lines[0], "argus") || !strings.Contains(lines[0], "watching 2 repos") {
+		t.Errorf("header %q", lines[0])
+	}
+	if !strings.Contains(lines[1], "[1] Runs") || !strings.Contains(lines[1], "[5] Runners") {
+		t.Errorf("tab line %q", lines[1])
+	}
+	if last := lines[19]; !strings.Contains(last, "q quit") {
+		t.Errorf("status bar %q, want hints", last)
+	}
+}
+
+func TestPromptShowsInStatusBar(t *testing.T) {
+	f := &fakeWatch{}
+	m := onRunsTab(t, f)
+
+	m, _ = step(m, keyMsg("r"))
+	lines := strings.Split(view(m), "\n")
+	if last := lines[len(lines)-1]; !strings.Contains(last, "rerun failed jobs of #16 Manifest check? y/n") {
+		t.Errorf("status bar %q", last)
+	}
+}
+
+func TestLightBackgroundSwitchesPalette(t *testing.T) {
+	f := &fakeWatch{}
+	m := sized(New(f.deps(), newPicker(), []string{"o/a"}))
+	defer theme.SetDark(true)
+
+	step(m, tea.BackgroundColorMsg{Color: color.White})
+	if theme.Current().Text == theme.Current().Bar || theme.Current().Plume != lipgloss.Color("#12798A") {
+		t.Errorf("palette not switched to light: %+v", theme.Current())
+	}
+}
+
+func TestHeaderShowsRequestsLeft(t *testing.T) {
+	f := &fakeWatch{remaining: 4987}
+	m := sized(New(f.deps(), newPicker(), []string{"o/a"}))
+
+	if l := strings.Split(view(m), "\n")[0]; !strings.Contains(l, "4987 requests left") {
+		t.Errorf("header %q", l)
+	}
+	f.remaining = -1
+	if l := strings.Split(view(m), "\n")[0]; strings.Contains(l, "requests left") {
+		t.Errorf("header %q shows a count before any request", l)
+	}
+}
+
+func TestQuestionMarkTogglesHelp(t *testing.T) {
+	f := &fakeWatch{}
+	m := sized(New(f.deps(), newPicker(), []string{"o/a"}))
+
+	m, _ = step(m, keyMsg("?"))
+	v := view(m)
+	if !strings.Contains(v, "keys") || !strings.Contains(v, "rerun failed jobs") || !strings.Contains(v, "Workflows") {
+		t.Fatalf("help not shown:\n%s", v)
+	}
+	m, _ = step(m, keyMsg("?"))
+	if v := view(m); strings.Contains(v, "rerun failed jobs") {
+		t.Errorf("? did not close help:\n%s", v)
+	}
+	m, _ = step(m, keyMsg("?"))
+	m, _ = step(m, tea.KeyPressMsg{Code: tea.KeyEscape})
+	if v := view(m); strings.Contains(v, "rerun failed jobs") {
+		t.Errorf("esc did not close help:\n%s", v)
+	}
+}
+
+func TestHelpSwallowsKeysButQuitStillWorks(t *testing.T) {
+	f := &fakeWatch{}
+	m := onRunsTab(t, f)
+
+	m, _ = step(m, keyMsg("?"))
+	m, _ = step(m, keyMsg("r"))
+	if v := view(m); strings.Contains(v, "y/n") {
+		t.Errorf("r acted behind the help screen:\n%s", v)
+	}
+	_, cmd := step(m, keyMsg("q"))
+	if cmd == nil {
+		t.Fatal("q returned no command")
+	}
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Error("q did not quit from the help screen")
+	}
+}
+
+func TestQuestionMarkInLogSearchIsText(t *testing.T) {
+	f := &fakeWatch{logBody: []joblog.Line{{Text: "why?"}}}
+	m, fetch := onLogScreen(t, f)
+	m, _ = step(m, fetch())
+
+	m, _ = step(m, keyMsg("/"))
+	m, _ = step(m, keyMsg("?"))
+	if v := view(m); strings.Contains(v, "rerun failed jobs") {
+		t.Errorf("? opened help while typing a search:\n%s", v)
+	}
+}
+
+func TestStatusBarDropsLegendBeforeHints(t *testing.T) {
+	f := &fakeWatch{}
+	m := New(f.deps(), newPicker(), []string{"o/a"})
+
+	wide, _ := step(m, tea.WindowSizeMsg{Width: 160, Height: 20})
+	lines := strings.Split(view(wide), "\n")
+	if last := lines[len(lines)-1]; !strings.Contains(last, "+ pass") || !strings.Contains(last, "q quit") {
+		t.Errorf("wide status bar %q, want legend and hints", last)
+	}
+	narrow, _ := step(m, tea.WindowSizeMsg{Width: 80, Height: 20})
+	lines = strings.Split(view(narrow), "\n")
+	if last := lines[len(lines)-1]; strings.Contains(last, "+ pass") || !strings.Contains(last, "tab pane") {
+		t.Errorf("narrow status bar %q, want hints without the legend", last)
 	}
 }

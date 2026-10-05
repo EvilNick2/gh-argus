@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/EvilNick2/gh-argus/internal/repos"
 )
@@ -271,9 +272,9 @@ func TestStatusMsgShowsBadge(t *testing.T) {
 	m, _ := newModel(t, sample, nil, 20)
 
 	m = send(m, StatusMsg{Statuses: map[string]repos.Status{"EvilNick2/dotfiles": repos.StatusFailing}})
-	for _, line := range strings.Split(m.View().Content, "\n") {
+	for _, line := range strings.Split(ansi.Strip(m.View().Content), "\n") {
 		if strings.Contains(line, "dotfiles") {
-			if !strings.Contains(line, "fail") {
+			if !strings.Contains(line, "x EvilNick2/dotfiles") {
 				t.Errorf("dotfiles row has no fail badge: %q", line)
 			}
 			return
@@ -361,5 +362,22 @@ func TestEnterSendsConfirmMsgInsteadOfQuitting(t *testing.T) {
 	msg, ok := cmd().(ConfirmMsg)
 	if !ok || !slices.Equal(msg.Repos, []string{"Bath-Impact-Lab/aXR-www"}) {
 		t.Errorf("got %#v, want ConfirmMsg with aXR-www", msg)
+	}
+}
+
+func TestPickerFillsScreenWithBars(t *testing.T) {
+	m, _ := newModel(t, sample, nil, 20)
+
+	lines := strings.Split(ansi.Strip(m.View().Content), "\n")
+	if len(lines) != 20 {
+		t.Fatalf("%d lines, want 20", len(lines))
+	}
+	for i, l := range lines {
+		if w := ansi.StringWidth(l); w != 80 {
+			t.Errorf("line %d is %d wide, want 80: %q", i, w, l)
+		}
+	}
+	if !strings.Contains(lines[0], "argus") || !strings.Contains(lines[19], "enter watch") {
+		t.Errorf("header %q, status %q", lines[0], lines[19])
 	}
 }
