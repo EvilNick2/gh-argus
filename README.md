@@ -27,7 +27,9 @@ one's latest run. `space` selects, `/` filters, `o` cycles through owners and
 `enter` starts watching. The picker remembers your last selection, and `p`
 brings it back at any time.
 
-`-R` skips the picker and watches the repos given.
+`-R` skips the picker and watches the repos given. `gh argus -version`
+prints the version, which the header also shows. A build from a release tag
+shows the tag, and any other build shows "dev" and its commit.
 
 ### Tabs
 
