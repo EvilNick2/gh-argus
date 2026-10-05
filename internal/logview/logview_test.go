@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/EvilNick2/gh-argus/internal/joblog"
@@ -354,5 +356,74 @@ func TestWheelScrollsThreeLines(t *testing.T) {
 	m, _ = m.Mouse(mouse.Event{X: 5, Y: 5, Kind: mouse.WheelUp})
 	if v := view(m); !shows(v, "line 0") {
 		t.Errorf("wheel up:\n%s", v)
+	}
+}
+
+var clock = time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+
+var runningJob = runs.Job{ID: 70, Name: "test (windows-latest)", Status: "in_progress", StartedAt: clock.Add(-2 * time.Minute), Steps: []runs.Step{
+	{Number: 1, Name: "Set up job", Status: "completed", Conclusion: "success", StartedAt: clock.Add(-2 * time.Minute), CompletedAt: clock.Add(-110 * time.Second)},
+	{Number: 2, Name: "Run go test", Status: "in_progress", StartedAt: clock.Add(-72 * time.Second)},
+	{Number: 3, Name: "Post checkout", Status: "queued"},
+}}
+
+func waiting(j runs.Job) Model {
+	return New("EvilNick2/gh-argus", j).WithClock(func() time.Time { return clock }).
+		Waiting("log appears when the job finishes").SetSize(80, 12)
+}
+
+func TestWaitingShowsTheJobsStepsLive(t *testing.T) {
+	v := ansi.Strip(waiting(runningJob).View())
+
+	for _, want := range []string{"log appears when the job finishes", "+  1 Set up job", "10s", "*  2 Run go test", "1m12s", "o  3 Post checkout"} {
+		if !strings.Contains(v, want) {
+			t.Errorf("missing %q in:\n%s", want, v)
+		}
+	}
+}
+
+func TestWaitingHighlightsTheRunningStep(t *testing.T) {
+	raw := waiting(runningJob).View()
+	marked := lipgloss.NewStyle().Background(theme.Current().Selection).Render("x")
+	on := marked[:strings.Index(marked, "x")]
+
+	for _, l := range strings.Split(raw, "\n") {
+		text := ansi.Strip(l)
+		if highlighted := strings.Contains(l, on); highlighted != strings.Contains(text, "Run go test") {
+			t.Errorf("highlighted %v: %q", highlighted, text)
+		}
+	}
+}
+
+func TestWaitingForARunner(t *testing.T) {
+	queued := runs.Job{ID: 70, Name: "test", Status: "queued"}
+
+	if v := ansi.Strip(waiting(queued).View()); !strings.Contains(v, "waiting for a runner") {
+		t.Errorf("view:\n%s", v)
+	}
+}
+
+func TestLogReplacesTheSteps(t *testing.T) {
+	m := waiting(runningJob)
+	m, _ = m.Update(LogMsg{Lines: []joblog.Line{{Text: "ok  github.com/EvilNick2/gh-argus"}}})
+
+	if v := ansi.Strip(m.View()); strings.Contains(v, "Set up job") || !strings.Contains(v, "ok  github.com") {
+		t.Errorf("view:\n%s", v)
+	}
+}
+
+func TestWaitingKeepsTheRunningStepInView(t *testing.T) {
+	long := runningJob
+	long.Steps = nil
+	for i := 1; i <= 30; i++ {
+		s := runs.Step{Number: i, Name: fmt.Sprintf("step %02d", i), Status: "completed", Conclusion: "success"}
+		if i == 25 {
+			s.Status, s.Conclusion, s.StartedAt = "in_progress", "", clock.Add(-5*time.Second)
+		}
+		long.Steps = append(long.Steps, s)
+	}
+
+	if v := ansi.Strip(waiting(long).View()); !strings.Contains(v, "step 25") {
+		t.Errorf("running step scrolled out of view:\n%s", v)
 	}
 }

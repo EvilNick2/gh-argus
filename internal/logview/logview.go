@@ -5,6 +5,7 @@ package logview
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -14,6 +15,7 @@ import (
 	"github.com/EvilNick2/gh-argus/internal/mouse"
 	"github.com/EvilNick2/gh-argus/internal/runs"
 	"github.com/EvilNick2/gh-argus/internal/theme"
+	"github.com/EvilNick2/gh-argus/internal/timefmt"
 )
 
 // LogMsg delivers a fetched log, or the error from fetching it.
@@ -42,8 +44,10 @@ type Model struct {
 	lines  []joblog.Line
 	loaded bool
 	err    error
-	// waiting replaces "loading log" while there is no log to fetch yet.
+	// waiting replaces "loading log" while there is no log to fetch yet,
+	// and the job's steps are shown live in its place.
 	waiting string
+	now     func() time.Time
 
 	rows     []row
 	firstRow []int // first row index of each line
@@ -59,7 +63,13 @@ type Model struct {
 }
 
 func New(repo string, job runs.Job) Model {
-	return Model{repo: repo, job: job, wrap: true}
+	return Model{repo: repo, job: job, wrap: true, now: time.Now}
+}
+
+// WithClock sets the clock the running step's timer reads.
+func (m Model) WithClock(now func() time.Time) Model {
+	m.now = now
+	return m
 }
 
 func (m Model) SetSize(w, h int) Model {
@@ -344,6 +354,19 @@ func (m Model) View() string {
 	}
 
 	out := []string{status}
+	if !m.loaded && m.waiting != "" && m.err == nil {
+		out = append(out, "")
+		out = append(out, m.steps()...)
+		// Scroll so the running step stays in view below the blank line.
+		if extra := len(out) - (m.bodyRows() + 1); extra > 0 {
+			for i, st := range m.job.Steps {
+				if st.Status == "in_progress" {
+					drop := min(extra, max(0, i-m.bodyRows()/2))
+					out = append(out[:2], out[2+drop:]...)
+				}
+			}
+		}
+	}
 	if m.loaded {
 		for _, r := range m.rows[m.top:min(len(m.rows), m.top+m.bodyRows())] {
 			out = append(out, " "+r.text)
@@ -359,4 +382,40 @@ func (m Model) Mouse(ev mouse.Event) (Model, tea.Cmd) {
 		m.clamp()
 	}
 	return m, nil
+}
+
+// steps lists the job's steps with how long each took, or has been running,
+// highlighting the one in progress.
+func (m Model) steps() []string {
+	j := m.job
+	if len(j.Steps) == 0 {
+		if j.Status == "in_progress" {
+			return []string{theme.Muted().Render(" starting")}
+		}
+		return []string{theme.Muted().Render(" waiting for a runner")}
+	}
+	nameW := 0
+	for _, s := range j.Steps {
+		nameW = max(nameW, ansi.StringWidth(s.Name)+3)
+	}
+	inner := max(1, m.width-2)
+	var out []string
+	for _, s := range j.Steps {
+		took := ""
+		if !s.StartedAt.IsZero() {
+			end := s.CompletedAt
+			if end.IsZero() {
+				end = m.now()
+			}
+			took = timefmt.Duration(end.Sub(s.StartedAt))
+		}
+		label := fmt.Sprintf("%2d %s", s.Number, s.Name)
+		row := " " + theme.Icon(s.Status, s.Conclusion) + " " + theme.Text().Render(label+strings.Repeat(" ", max(0, nameW-ansi.StringWidth(label)))) +
+			"  " + theme.Muted().Render(took)
+		if s.Status == "in_progress" {
+			row = theme.Selected(row, inner)
+		}
+		out = append(out, row)
+	}
+	return out
 }

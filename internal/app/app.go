@@ -392,6 +392,10 @@ func (m Model) cycleAttempt() (tea.Model, tea.Cmd) {
 // the fetch it retries.
 type logRetryMsg struct{ gen int }
 
+// logTickMsg redraws a running job's steps so the current step's timer
+// moves between polls.
+type logTickMsg struct{ gen int }
+
 // GitHub writes a job's log only once the job finishes, and it can take a
 // few seconds after that to appear, so a 404 then is retried.
 const (
@@ -401,7 +405,7 @@ const (
 
 func (m *Model) openLog(repo string, job runs.Job) tea.Cmd {
 	m.logRep, m.logJob = repo, job
-	m.log = logview.New(repo, job).SetSize(m.width, m.runHeight())
+	m.log = logview.New(repo, job).WithClock(m.deps.Now).SetSize(m.width, m.runHeight())
 	m.screen = screenLog
 	return m.fetchLog()
 }
@@ -413,9 +417,14 @@ func (m *Model) fetchLog() tea.Cmd {
 	if m.logJob.Status != "completed" {
 		m.logGen++
 		m.log = m.log.Waiting("log appears when the job finishes")
-		return nil
+		return m.logTick()
 	}
 	return m.refetchLog()
+}
+
+func (m *Model) logTick() tea.Cmd {
+	gen := m.logGen
+	return tea.Tick(time.Second, func(time.Time) tea.Msg { return logTickMsg{gen} })
 }
 
 func (m *Model) refetchLog() tea.Cmd {
@@ -535,7 +544,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
-		return m, m.wait()
+		return m, tea.Batch(bell(msg.ev), m.wait())
 
 	case attemptMsg:
 		if msg.gen != m.runGen {
@@ -585,6 +594,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.log, _ = m.log.Update(logview.LogMsg{Lines: msg.lines, Err: msg.err})
 		return m, nil
+
+	case logTickMsg:
+		if msg.gen != m.logGen || m.screen != screenLog || m.logJob.Status == "completed" {
+			return m, nil
+		}
+		return m, m.logTick()
 
 	case logRetryMsg:
 		if msg.gen != m.logGen || m.screen != screenLog {
@@ -1226,4 +1241,19 @@ func (m Model) statusBar(help string, legend bool) string {
 		right = ansi.Truncate(right, max(0, room), "")
 	}
 	return theme.Bar(left, right, m.width)
+}
+
+// bell rings the terminal bell when a watched run finishes. Changes on the
+// first poll are runs that finished while argus was closed, so they do not
+// ring.
+func bell(ev watch.Event) tea.Cmd {
+	if ev.Initial {
+		return nil
+	}
+	for _, c := range ev.Changes {
+		if c.Run.Status == "completed" && (c.Prev == nil || c.Prev.Status != "completed") {
+			return tea.Raw("\a")
+		}
+	}
+	return nil
 }

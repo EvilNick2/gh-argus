@@ -1737,8 +1737,7 @@ func TestRunningJobLogWaitsForTheJobToFinish(t *testing.T) {
 	running := logJob
 	running.Status, running.Conclusion = "in_progress", ""
 
-	m, cmd := step(m, runview.OpenLogMsg{Repo: "o/r", Job: running})
-	m = runOnce(m, cmd)
+	m, _ = step(m, runview.OpenLogMsg{Repo: "o/r", Job: running})
 	if len(f.logCalls) != 0 {
 		t.Errorf("fetched the log of a running job: %v", f.logCalls)
 	}
@@ -1747,7 +1746,7 @@ func TestRunningJobLogWaitsForTheJobToFinish(t *testing.T) {
 	}
 
 	f.runChans[0] <- watch.RunEvent{Jobs: []runs.Job{logJob}}
-	m, cmd = step(m, wait())
+	m, cmd := step(m, wait())
 	// A second poll with the job unchanged lets the batched wait return, and
 	// must not fetch again.
 	f.runChans[0] <- watch.RunEvent{Jobs: []runs.Job{logJob}}
@@ -1795,5 +1794,92 @@ func TestLogRetriesGiveUp(t *testing.T) {
 	}
 	if v := view(m); !strings.Contains(v, "404 Not Found") {
 		t.Errorf("log screen after giving up:\n%s", v)
+	}
+}
+
+func TestLogScreenTicksWhileTheJobRuns(t *testing.T) {
+	f := &fakeWatch{}
+	m, wait := onRunScreen(t, f)
+	running := logJob
+	running.Status, running.Conclusion = "in_progress", ""
+
+	m, tick := step(m, runview.OpenLogMsg{Repo: "o/r", Job: running})
+	if tick == nil {
+		t.Fatal("no tick for a running job's log")
+	}
+	m, tick = step(m, logTickMsg{gen: m.logGen})
+	if tick == nil {
+		t.Error("tick stopped while the job still runs")
+	}
+
+	f.runChans[0] <- watch.RunEvent{Jobs: []runs.Job{logJob}}
+	m, _ = step(m, wait())
+	if _, tick = step(m, logTickMsg{gen: m.logGen}); tick != nil {
+		t.Error("tick kept going after the job finished")
+	}
+}
+
+// eventCmds steps a repo watch event and returns every message its command
+// produces, feeding the watch another event so the batched wait returns.
+func eventCmds(t *testing.T, f *fakeWatch, m Model, ev watch.Event) []tea.Msg {
+	t.Helper()
+	m, cmd := step(m, eventMsg{gen: m.gen, ev: ev, ok: true})
+	f.chans[0] <- watch.Event{Repo: "o/r"}
+	if cmd == nil {
+		return nil
+	}
+	msg := cmd()
+	if batch, ok := msg.(tea.BatchMsg); ok {
+		var out []tea.Msg
+		for _, c := range batch {
+			if c != nil {
+				out = append(out, c())
+			}
+		}
+		return out
+	}
+	return []tea.Msg{msg}
+}
+
+func rang(msgs []tea.Msg) bool {
+	for _, msg := range msgs {
+		if raw, ok := msg.(tea.RawMsg); ok && raw.Msg == "\a" {
+			return true
+		}
+	}
+	return false
+}
+
+func TestBellRingsWhenAWatchedRunFinishes(t *testing.T) {
+	f := &fakeWatch{}
+	m := sized(New(f.deps(), newPicker(), []string{"o/r"}))
+	done := openRun
+	done.Status, done.Conclusion = "completed", "success"
+
+	msgs := eventCmds(t, f, m, watch.Event{Repo: "o/r", Runs: []runs.Run{done}, Changes: []runs.Change{{Prev: &openRun, Run: done}}})
+	if !rang(msgs) {
+		t.Errorf("no bell, got %v", msgs)
+	}
+}
+
+func TestNoBellForRunsThatFinishedBeforeLaunch(t *testing.T) {
+	f := &fakeWatch{}
+	m := sized(New(f.deps(), newPicker(), []string{"o/r"}))
+	done := openRun
+	done.Status, done.Conclusion = "completed", "success"
+
+	msgs := eventCmds(t, f, m, watch.Event{Repo: "o/r", Initial: true, Runs: []runs.Run{done}, Changes: []runs.Change{{Prev: &openRun, Run: done}}})
+	if rang(msgs) {
+		t.Error("bell on the first poll")
+	}
+}
+
+func TestNoBellWhenARunStarts(t *testing.T) {
+	f := &fakeWatch{}
+	m := sized(New(f.deps(), newPicker(), []string{"o/r"}))
+
+	msgs := eventCmds(t, f, m, watch.Event{Repo: "o/r", Runs: []runs.Run{openRun}, Changes: []runs.Change{{Run: openRun}}})
+	if rang(msgs) {
+		t.Error("bell for a run that only started")
 	}
 }
