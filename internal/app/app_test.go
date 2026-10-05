@@ -54,7 +54,11 @@ type fakeWatch struct {
 	wfSets  []string
 
 	specs      map[int64]workflows.DispatchSpec
+	refSpecs   map[string]map[int64]workflows.DispatchSpec
+	refErr     map[string]error
+	specRefs   []string
 	dispatches []string
+	envCalls   []string
 
 	recentCalls []string
 	recent      map[string][]runs.Run
@@ -100,8 +104,18 @@ func (f *fakeWatch) deps() Deps {
 			f.wfCalls = append(f.wfCalls, repo)
 			return f.wfs[repo], nil
 		},
-		DispatchSpec: func(ctx context.Context, repo string, wf workflows.Workflow) (string, workflows.DispatchSpec, error) {
-			return "main", f.specs[wf.ID], nil
+		DispatchSpec: func(ctx context.Context, repo string, wf workflows.Workflow, ref string) (string, workflows.DispatchSpec, error) {
+			f.specRefs = append(f.specRefs, ref)
+			if ref == "" {
+				return "main", f.specs[wf.ID], nil
+			}
+			if err := f.refErr[ref]; err != nil {
+				return ref, workflows.DispatchSpec{}, err
+			}
+			if specs, ok := f.refSpecs[ref]; ok {
+				return ref, specs[wf.ID], nil
+			}
+			return ref, f.specs[wf.ID], nil
 		},
 		RecentRuns: func(ctx context.Context, repo string) ([]runs.Run, error) {
 			f.recentCalls = append(f.recentCalls, repo)
@@ -121,6 +135,10 @@ func (f *fakeWatch) deps() Deps {
 		DeleteCache: func(ctx context.Context, repo string, id int64) error {
 			f.deleted = append(f.deleted, fmt.Sprintf("%s/%d", repo, id))
 			return nil
+		},
+		Environments: func(ctx context.Context, repo string) ([]string, error) {
+			f.envCalls = append(f.envCalls, repo)
+			return []string{"github-pages", "production"}, nil
 		},
 		Branches: func(ctx context.Context, repo string) ([]string, error) {
 			return []string{"dev", "main"}, nil
@@ -1315,5 +1333,183 @@ func TestWheelScrollsHelpAndClickCloses(t *testing.T) {
 	m, _ = step(m, leftClick(30, 10))
 	if v := view(m); strings.Contains(v, "shift+drag") {
 		t.Error("click did not close help")
+	}
+}
+
+func TestRRefreshesTheOtherTabs(t *testing.T) {
+	f := &fakeWatch{}
+	m := sized(New(f.deps(), newPicker(), []string{"o/a"}))
+	counts := map[string]func() int{
+		"2": func() int { return len(f.wfCalls) },
+		"3": func() int { return len(f.recentCalls) },
+		"4": func() int { return len(f.cacheCalls) },
+		"5": func() int { return len(f.runnerCalls) },
+	}
+	for _, tab := range []string{"2", "3", "4", "5"} {
+		var cmd tea.Cmd
+		m, cmd = step(m, keyMsg(tab))
+		m = runAll(m, cmd)
+		before := counts[tab]()
+		m, cmd = step(m, keyMsg("r"))
+		if v := view(m); !strings.Contains(v, "refreshing") {
+			t.Errorf("tab %s: no refreshing message:\n%s", tab, v)
+		}
+		m = runAll(m, cmd)
+		if counts[tab]() != before+1 {
+			t.Errorf("tab %s: r loaded %d times, want once", tab, counts[tab]()-before)
+		}
+	}
+}
+
+func TestRStillRerunsOnRunsTab(t *testing.T) {
+	f := &fakeWatch{}
+	m := onRunsTab(t, f)
+
+	m, _ = step(m, keyMsg("r"))
+	if v := view(m); !strings.Contains(v, "rerun failed jobs of #16") {
+		t.Errorf("view:\n%s", v)
+	}
+}
+
+func TestForceCancelFromRunScreen(t *testing.T) {
+	f := &fakeWatch{}
+	m, _ := onRunScreen(t, f)
+
+	m, _ = step(m, keyMsg("C"))
+	if v := view(m); !strings.Contains(v, "force cancel #7 build? y/n") {
+		t.Fatalf("no prompt:\n%s", v)
+	}
+	m, cmd := step(m, keyMsg("y"))
+	runAll(m, cmd)
+	if len(f.acts) != 1 || f.acts[0] != "o/r/7 force cancel" {
+		t.Errorf("acts %v", f.acts)
+	}
+}
+
+func TestEnvironmentInputGetsRepoEnvironments(t *testing.T) {
+	f := &fakeWatch{
+		wfs:   map[string][]workflows.Workflow{"o/a": {needyWF}},
+		specs: map[int64]workflows.DispatchSpec{5: {Dispatchable: true, Inputs: []workflows.Input{{Name: "target", Type: "environment", Required: true}}}},
+	}
+	m := openForm(t, f, tea.KeyPressMsg{Code: tea.KeyEnter})
+
+	if v := view(m); !strings.Contains(v, "2 environments") {
+		t.Errorf("form without environments:\n%s", v)
+	}
+}
+
+func TestEnvironmentsNotFetchedWithoutEnvironmentInputs(t *testing.T) {
+	f := &fakeWatch{
+		wfs:   map[string][]workflows.Workflow{"o/a": {buildWF}},
+		specs: map[int64]workflows.DispatchSpec{1: {Dispatchable: true}},
+	}
+	openForm(t, f, keyMsg("i"))
+
+	if len(f.envCalls) != 0 {
+		t.Errorf("environments fetched for a workflow without environment inputs: %v", f.envCalls)
+	}
+}
+
+var tagInput = []workflows.Input{{Name: "tag", Type: "string"}}
+
+// submitOnBranch opens the form on needyWF, switches the branch to ref with
+// left (the fake branches are dev and main) and submits.
+func submitOnBranch(t *testing.T, f *fakeWatch) Model {
+	t.Helper()
+	m := openForm(t, f, keyMsg("i"))
+	for _, r := range "x" {
+		m, _ = step(m, keyMsg(string(r)))
+	}
+	m, _ = step(m, tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
+	m, _ = step(m, tea.KeyPressMsg{Code: tea.KeyLeft})
+	m, cmd := step(m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	return runAll(m, cmd)
+}
+
+func TestSubmitOnDefaultBranchDoesNotRecheck(t *testing.T) {
+	f := &fakeWatch{
+		wfs:   map[string][]workflows.Workflow{"o/a": {needyWF}},
+		specs: map[int64]workflows.DispatchSpec{5: {Dispatchable: true, Inputs: tagInput}},
+	}
+	m := openForm(t, f, keyMsg("i"))
+	m, cmd := step(m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	runAll(m, cmd)
+
+	if !slices.Equal(f.specRefs, []string{""}) {
+		t.Errorf("workflow file read for %q, want the default branch only", f.specRefs)
+	}
+	if len(f.dispatches) != 1 {
+		t.Errorf("dispatches %v", f.dispatches)
+	}
+}
+
+func TestSubmitOnOtherBranchWithSameInputsDispatches(t *testing.T) {
+	f := &fakeWatch{
+		wfs:   map[string][]workflows.Workflow{"o/a": {needyWF}},
+		specs: map[int64]workflows.DispatchSpec{5: {Dispatchable: true, Inputs: tagInput}},
+	}
+	submitOnBranch(t, f)
+
+	if !slices.Equal(f.specRefs, []string{"", "dev"}) {
+		t.Errorf("workflow file read for %q, want default then dev", f.specRefs)
+	}
+	if len(f.dispatches) != 1 || f.dispatches[0] != "o/a/5@dev map[tag:x]" {
+		t.Errorf("dispatches %v", f.dispatches)
+	}
+}
+
+func TestSubmitOnBranchWithDifferentInputsReopensForm(t *testing.T) {
+	devInputs := []workflows.Input{{Name: "tag", Type: "string"}, {Name: "channel", Type: "string", Required: true}}
+	f := &fakeWatch{
+		wfs:      map[string][]workflows.Workflow{"o/a": {needyWF}},
+		specs:    map[int64]workflows.DispatchSpec{5: {Dispatchable: true, Inputs: tagInput}},
+		refSpecs: map[string]map[int64]workflows.DispatchSpec{"dev": {5: {Dispatchable: true, Inputs: devInputs}}},
+	}
+	m := submitOnBranch(t, f)
+
+	if len(f.dispatches) != 0 {
+		t.Fatalf("dispatched despite different inputs: %v", f.dispatches)
+	}
+	v := view(m)
+	if !strings.Contains(v, "run Release on dev") || !strings.Contains(v, "channel*") || !strings.Contains(v, "inputs differ on dev") {
+		t.Fatalf("form not reopened for dev:\n%s", v)
+	}
+	// The tag typed before carries over. Fill channel and run.
+	for _, r := range "beta" {
+		m, _ = step(m, keyMsg(string(r)))
+	}
+	m, cmd := step(m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	runAll(m, cmd)
+	if len(f.dispatches) != 1 || f.dispatches[0] != "o/a/5@dev map[channel:beta tag:x]" {
+		t.Errorf("dispatches %v", f.dispatches)
+	}
+}
+
+func TestSubmitOnBranchWithoutTriggerStaysOnForm(t *testing.T) {
+	f := &fakeWatch{
+		wfs:      map[string][]workflows.Workflow{"o/a": {needyWF}},
+		specs:    map[int64]workflows.DispatchSpec{5: {Dispatchable: true, Inputs: tagInput}},
+		refSpecs: map[string]map[int64]workflows.DispatchSpec{"dev": {5: {Dispatchable: false}}},
+	}
+	m := submitOnBranch(t, f)
+
+	if len(f.dispatches) != 0 {
+		t.Errorf("dispatched %v", f.dispatches)
+	}
+	if v := view(m); !strings.Contains(v, "Release has no workflow_dispatch trigger on dev") {
+		t.Errorf("view:\n%s", v)
+	}
+}
+
+func TestSubmitOnBranchWithoutFileSaysSo(t *testing.T) {
+	f := &fakeWatch{
+		wfs:    map[string][]workflows.Workflow{"o/a": {needyWF}},
+		specs:  map[int64]workflows.DispatchSpec{5: {Dispatchable: true, Inputs: tagInput}},
+		refErr: map[string]error{"dev": &fetch.StatusError{StatusCode: 404, Path: "/x"}},
+	}
+	m := submitOnBranch(t, f)
+
+	if v := view(m); !strings.Contains(v, ".github/workflows/release.yml does not exist on dev") {
+		t.Errorf("view:\n%s", v)
 	}
 }

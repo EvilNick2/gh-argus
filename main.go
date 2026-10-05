@@ -81,7 +81,7 @@ func run() error {
 			raw, out := make(chan watch.Event), make(chan watch.Event)
 			var wg sync.WaitGroup
 			for _, r := range rs {
-				wg.Go(func() { w.Watch(ctx, r, snaps.Seed(r), raw) })
+				wg.Go(func() { w.Watch(ctx, r, snaps.SeedOnce(r), raw) })
 			}
 			go func() {
 				wg.Wait()
@@ -129,27 +129,30 @@ func run() error {
 			}
 			return workflows.Decode(res.Body)
 		},
-		DispatchSpec: func(ctx context.Context, repo string, wf workflows.Workflow) (string, workflows.DispatchSpec, error) {
-			res, err := w.Fetcher.Get(ctx, "/repos/"+repo)
+		DispatchSpec: func(ctx context.Context, repo string, wf workflows.Workflow, ref string) (string, workflows.DispatchSpec, error) {
+			if ref == "" {
+				res, err := w.Fetcher.Get(ctx, "/repos/"+repo)
+				if err != nil {
+					return "", workflows.DispatchSpec{}, err
+				}
+				var info struct {
+					DefaultBranch string `json:"default_branch"`
+				}
+				if err := json.Unmarshal(res.Body, &info); err != nil {
+					return "", workflows.DispatchSpec{}, err
+				}
+				ref = info.DefaultBranch
+			}
+			res, err := w.Fetcher.Get(ctx, "/repos/"+repo+"/contents/"+wf.Path+"?ref="+url.QueryEscape(ref))
 			if err != nil {
-				return "", workflows.DispatchSpec{}, err
-			}
-			var info struct {
-				DefaultBranch string `json:"default_branch"`
-			}
-			if err := json.Unmarshal(res.Body, &info); err != nil {
-				return "", workflows.DispatchSpec{}, err
-			}
-			res, err = w.Fetcher.Get(ctx, "/repos/"+repo+"/contents/"+wf.Path+"?ref="+url.QueryEscape(info.DefaultBranch))
-			if err != nil {
-				return "", workflows.DispatchSpec{}, err
+				return ref, workflows.DispatchSpec{}, err
 			}
 			src, err := workflows.DecodeContent(res.Body)
 			if err != nil {
-				return "", workflows.DispatchSpec{}, err
+				return ref, workflows.DispatchSpec{}, err
 			}
 			spec, err := workflows.ParseDispatch(src)
-			return info.DefaultBranch, spec, err
+			return ref, spec, err
 		},
 		RecentRuns: func(ctx context.Context, repo string) ([]runs.Run, error) {
 			res, err := w.Fetcher.Get(ctx, "/repos/"+repo+"/actions/runs?per_page=100")
@@ -176,19 +179,10 @@ func run() error {
 			return actions.DeleteCache(ctx, client, apiURL, repo, id)
 		},
 		Branches: func(ctx context.Context, repo string) ([]string, error) {
-			res, err := w.Fetcher.Get(ctx, "/repos/"+repo+"/branches?per_page=100")
-			if err != nil {
-				return nil, err
-			}
-			var page []struct{ Name string }
-			if err := json.Unmarshal(res.Body, &page); err != nil {
-				return nil, err
-			}
-			names := make([]string, len(page))
-			for i, b := range page {
-				names[i] = b.Name
-			}
-			return names, nil
+			return repos.Branches(ctx, getBody(w.Fetcher), repo)
+		},
+		Environments: func(ctx context.Context, repo string) ([]string, error) {
+			return repos.Environments(ctx, getBody(w.Fetcher), repo)
 		},
 		Dispatch: func(ctx context.Context, repo string, id int64, ref string, inputs map[string]string) error {
 			return actions.Dispatch(ctx, client, apiURL, repo, id, ref, inputs)
@@ -220,6 +214,14 @@ func run() error {
 		err = ferr
 	}
 	return err
+}
+
+// getBody adapts a Fetcher to repos.Getter.
+func getBody(f *fetch.Fetcher) repos.Getter {
+	return func(ctx context.Context, path string) ([]byte, error) {
+		res, err := f.Get(ctx, path)
+		return res.Body, err
+	}
 }
 
 // newPicker opens the picker on the cached repo list and last selection, and

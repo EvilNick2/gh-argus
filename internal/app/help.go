@@ -28,6 +28,7 @@ var helpLeft = []helpSection{
 		{"r", "rerun failed jobs"},
 		{"R", "rerun all jobs"},
 		{"c", "cancel the run"},
+		{"C", "force cancel a stuck run"},
 	}},
 	{"Run", [][2]string{
 		{"enter", "open the job's log"},
@@ -50,6 +51,9 @@ var helpRight = []helpSection{
 	}},
 	{"Cache", [][2]string{
 		{"d", "delete the cache"},
+	}},
+	{"Workflows, Metrics, Cache, Runners", [][2]string{
+		{"r", "refresh"},
 	}},
 	{"Mouse", [][2]string{
 		{"click", "select, or switch tab"},

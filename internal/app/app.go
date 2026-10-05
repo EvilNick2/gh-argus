@@ -4,7 +4,9 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -15,6 +17,7 @@ import (
 	"github.com/EvilNick2/gh-argus/internal/caches"
 	"github.com/EvilNick2/gh-argus/internal/cachesview"
 	"github.com/EvilNick2/gh-argus/internal/dispatchform"
+	"github.com/EvilNick2/gh-argus/internal/fetch"
 	"github.com/EvilNick2/gh-argus/internal/joblog"
 	"github.com/EvilNick2/gh-argus/internal/logview"
 	"github.com/EvilNick2/gh-argus/internal/metricsview"
@@ -47,9 +50,9 @@ type Deps struct {
 	Remaining func() int
 	// ListWorkflows fetches the workflows of a repo.
 	ListWorkflows func(ctx context.Context, repo string) ([]workflows.Workflow, error)
-	// DispatchSpec returns the ref to dispatch on, normally the default
-	// branch, and what the workflow file says about dispatch.
-	DispatchSpec func(ctx context.Context, repo string, wf workflows.Workflow) (string, workflows.DispatchSpec, error)
+	// DispatchSpec reads what the workflow file on ref says about dispatch,
+	// returning the ref read. An empty ref means the default branch.
+	DispatchSpec func(ctx context.Context, repo string, wf workflows.Workflow, ref string) (string, workflows.DispatchSpec, error)
 	// RecentRuns fetches a repo's recent runs for the Metrics tab.
 	RecentRuns func(ctx context.Context, repo string) ([]runs.Run, error)
 	// ListRunners fetches a repo's self-hosted runners.
@@ -58,6 +61,9 @@ type Deps struct {
 	ListCaches func(ctx context.Context, repo string) ([]caches.Cache, error)
 	// DeleteCache deletes one cache.
 	DeleteCache func(ctx context.Context, repo string, id int64) error
+	// Environments lists a repo's deployment environments for the dispatch
+	// form.
+	Environments func(ctx context.Context, repo string) ([]string, error)
 	// Branches lists a repo's branches for the dispatch form.
 	Branches func(ctx context.Context, repo string) ([]string, error)
 	// Dispatch triggers a workflow on ref with inputs.
@@ -136,6 +142,7 @@ type specMsg struct {
 	wf       workflows.Workflow
 	ref      string
 	branches []string
+	envs     []string
 	spec     workflows.DispatchSpec
 	err      error
 }
@@ -159,6 +166,7 @@ var actionKeys = map[string]actions.Kind{
 	"r": actions.RerunFailed,
 	"R": actions.RerunAll,
 	"c": actions.Cancel,
+	"C": actions.ForceCancel,
 }
 
 type Model struct {
@@ -187,9 +195,15 @@ type Model struct {
 	form     dispatchform.Model
 	formRepo string
 	formWF   workflows.Workflow
-	logGen   int
-	logJob   runs.Job
-	logRep   string
+	// formRef is the branch the form's inputs were read from, with the
+	// lists the form was built with, to rebuild it for another branch.
+	formRef      string
+	formInputs   []workflows.Input
+	formBranches []string
+	formEnvs     []string
+	logGen       int
+	logJob       runs.Job
+	logRep       string
 
 	confirm  *pending
 	help     bool
@@ -232,6 +246,22 @@ func (m *Model) start(repos []string) {
 	m.rnrs = runnersview.New(repos).SetSize(m.width, m.bodyHeight())
 	m.repos = repos
 	m.screen, m.tab = screenTabs, 0
+}
+
+// loadTab fetches what the current tab shows. The Runs tab is kept current
+// by the watcher, so it has nothing to load.
+func (m Model) loadTab() tea.Cmd {
+	switch m.tab {
+	case 1:
+		return m.loadWorkflows(m.repos...)
+	case 2:
+		return m.loadMetrics()
+	case 3:
+		return m.loadCaches(m.repos...)
+	case 4:
+		return m.loadRunners()
+	}
+	return nil
 }
 
 // loadRunners fetches each watched repo's self-hosted runners.
@@ -458,15 +488,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case dispatchform.SubmitMsg:
-		m.screen = screenTabs
-		dispatch, repo, wf, ref, inputs := m.deps.Dispatch, m.formRepo, m.formWF, msg.Ref, msg.Inputs
-		p := pending{
-			success: fmt.Sprintf("dispatched %s on %s", wf.Name, ref),
-			failure: fmt.Sprintf("dispatch %s", wf.Name),
+		if msg.Ref != m.formRef {
+			return m.recheck(msg)
 		}
-		return m, func() tea.Msg {
-			return actionDoneMsg{pending: p, err: dispatch(context.Background(), repo, wf.ID, ref, inputs)}
+		return m.dispatchForm(msg.Ref, msg.Inputs)
+
+	case recheckMsg:
+		if msg.gen != m.gen || m.screen != screenForm {
+			return m, nil
 		}
+		return m.afterRecheck(msg)
 
 	case dispatchform.CancelMsg:
 		m.screen = screenTabs
@@ -590,7 +621,7 @@ func (m Model) ask(kind actions.Kind) Model {
 	case !kind.Allowed(r):
 		reason := "it has not finished"
 		switch {
-		case kind == actions.Cancel:
+		case kind == actions.Cancel || kind == actions.ForceCancel:
 			reason = "it has already completed"
 		case r.Status == "completed":
 			reason = "it succeeded"
@@ -669,12 +700,17 @@ func (m Model) checkDispatch(edit bool) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.flash = fmt.Sprintf("checking %s", wf.Name)
-	gen, get, list := m.gen, m.deps.DispatchSpec, m.deps.Branches
+	gen, get, list, listEnvs := m.gen, m.deps.DispatchSpec, m.deps.Branches, m.deps.Environments
 	return m, func() tea.Msg {
-		ref, spec, err := get(context.Background(), repo, wf)
-		// Without the branch list the field still takes any typed ref.
-		branches, _ := list(context.Background(), repo)
-		return specMsg{gen: gen, edit: edit, repo: repo, wf: wf, ref: ref, branches: branches, spec: spec, err: err}
+		ctx := context.Background()
+		ref, spec, err := get(ctx, repo, wf, "")
+		// Without these lists the fields still take any typed value.
+		branches, _ := list(ctx, repo)
+		var envs []string
+		if slices.ContainsFunc(spec.Inputs, func(in workflows.Input) bool { return in.Type == "environment" }) {
+			envs, _ = listEnvs(ctx, repo)
+		}
+		return specMsg{gen: gen, edit: edit, repo: repo, wf: wf, ref: ref, branches: branches, envs: envs, spec: spec, err: err}
 	}
 }
 
@@ -690,7 +726,9 @@ func (m Model) offerDispatch(msg specMsg) Model {
 	case msg.spec.NeedsInput() || msg.edit:
 		m.flash = ""
 		m.formRepo, m.formWF = msg.repo, msg.wf
-		m.form = dispatchform.New(msg.repo, msg.wf, msg.ref, msg.branches, msg.spec.Inputs).SetSize(m.width, m.runHeight())
+		m.formRef, m.formInputs, m.formBranches, m.formEnvs = msg.ref, msg.spec.Inputs, msg.branches, msg.envs
+		m.form = dispatchform.New(msg.repo, msg.wf, msg.ref, msg.branches, msg.spec.Inputs).
+			WithEnvironments(msg.envs).SetSize(m.width, m.runHeight())
 		m.screen = screenForm
 	default:
 		dispatch, repo, id, ref := m.deps.Dispatch, msg.repo, msg.wf.ID, msg.ref
@@ -705,10 +743,76 @@ func (m Model) offerDispatch(msg specMsg) Model {
 	return m
 }
 
+// recheckMsg carries the workflow file read from the branch a form was
+// submitted on, with the values the form held.
+type recheckMsg struct {
+	gen    int
+	ref    string
+	spec   workflows.DispatchSpec
+	err    error
+	values map[string]string
+}
+
+// recheck reads the workflow file on the branch a form was submitted on,
+// since GitHub runs that branch's file, whose inputs may differ.
+func (m Model) recheck(sub dispatchform.SubmitMsg) (tea.Model, tea.Cmd) {
+	m.form = m.form.WithMessage(fmt.Sprintf("checking %s on %s", m.formWF.Name, sub.Ref))
+	gen, get, repo, wf := m.gen, m.deps.DispatchSpec, m.formRepo, m.formWF
+	return m, func() tea.Msg {
+		ref, spec, err := get(context.Background(), repo, wf, sub.Ref)
+		return recheckMsg{gen: gen, ref: ref, spec: spec, err: err, values: sub.Inputs}
+	}
+}
+
+// afterRecheck dispatches when the branch's file takes the same inputs, and
+// otherwise keeps the form open saying why, rebuilt with that branch's
+// inputs if they differ.
+func (m Model) afterRecheck(msg recheckMsg) (tea.Model, tea.Cmd) {
+	name, ref := m.formWF.Name, msg.ref
+	var se *fetch.StatusError
+	switch {
+	case errors.As(msg.err, &se) && se.StatusCode == 404:
+		m.form = m.form.WithMessage(fmt.Sprintf("%s does not exist on %s", m.formWF.Path, ref))
+	case msg.err != nil:
+		m.form = m.form.WithMessage(fmt.Sprintf("checking %s on %s failed: %v", name, ref, msg.err))
+	case !msg.spec.Dispatchable:
+		m.form = m.form.WithMessage(fmt.Sprintf("%s has no workflow_dispatch trigger on %s", name, ref))
+	case sameInputs(m.formInputs, msg.spec.Inputs):
+		return m.dispatchForm(ref, msg.values)
+	default:
+		m.formRef, m.formInputs = ref, msg.spec.Inputs
+		m.form = dispatchform.New(m.formRepo, m.formWF, ref, m.formBranches, msg.spec.Inputs).
+			WithEnvironments(m.formEnvs).WithValues(msg.values).
+			WithMessage(fmt.Sprintf("the inputs differ on %s, check them and run again", ref)).
+			SetSize(m.width, m.runHeight())
+	}
+	return m, nil
+}
+
+// sameInputs reports inputs a form built from a can fill in for b.
+func sameInputs(a, b []workflows.Input) bool {
+	return slices.EqualFunc(a, b, func(x, y workflows.Input) bool {
+		return x.Name == y.Name && x.Type == y.Type && x.Required == y.Required && slices.Equal(x.Options, y.Options)
+	})
+}
+
+// dispatchForm leaves the form and dispatches its workflow on ref.
+func (m Model) dispatchForm(ref string, inputs map[string]string) (tea.Model, tea.Cmd) {
+	m.screen = screenTabs
+	dispatch, repo, wf := m.deps.Dispatch, m.formRepo, m.formWF
+	p := pending{
+		success: fmt.Sprintf("dispatched %s on %s", wf.Name, ref),
+		failure: fmt.Sprintf("dispatch %s", wf.Name),
+	}
+	return m, func() tea.Msg {
+		return actionDoneMsg{pending: p, err: dispatch(context.Background(), repo, wf.ID, ref, inputs)}
+	}
+}
+
 // phrase is the action applied to run number n, such as "cancel #7" or
 // "rerun failed jobs of #16".
 func phrase(kind actions.Kind, n int) string {
-	if kind == actions.Cancel {
+	if kind == actions.Cancel || kind == actions.ForceCancel {
 		return fmt.Sprintf("%v #%d", kind, n)
 	}
 	return fmt.Sprintf("%v of #%d", kind, n)
@@ -743,17 +847,13 @@ func (m Model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "1", "2", "3", "4", "5":
 		m.tab = int(k[0] - '1')
-		switch m.tab {
-		case 1:
-			return m, m.loadWorkflows(m.repos...)
-		case 2:
-			return m, m.loadMetrics()
-		case 3:
-			return m, m.loadCaches(m.repos...)
-		case 4:
-			return m, m.loadRunners()
+		return m, m.loadTab()
+	case "r":
+		// On the Runs tab r reruns failed jobs, handled before this.
+		if cmd := m.loadTab(); cmd != nil {
+			m.flash = "refreshing " + strings.ToLower(tabs[m.tab])
+			return m, cmd
 		}
-		return m, nil
 	}
 	var cmd tea.Cmd
 	switch m.tab {
@@ -788,16 +888,16 @@ func (m Model) View() tea.View {
 	switch m.tab {
 	case 1:
 		body = m.wfs.View()
-		help = "enter run  i branch/inputs  e/d enable/disable  p repos  ? keys  q quit"
+		help = "enter run  i branch/inputs  e/d enable/disable  r refresh  p repos  ? keys  q quit"
 	case 2:
 		body = m.mets.View()
-		help = "j/k move  p repos  ? keys  q quit"
+		help = "r refresh  p repos  ? keys  q quit"
 	case 3:
 		body = m.cchs.View()
-		help = "d delete  p repos  ? keys  q quit"
+		help = "d delete  r refresh  p repos  ? keys  q quit"
 	case 4:
 		body = m.rnrs.View()
-		help = "j/k move  p repos  ? keys  q quit"
+		help = "r refresh  p repos  ? keys  q quit"
 	}
 	return m.frame(body, true, m.bodyHeight(), help)
 }
