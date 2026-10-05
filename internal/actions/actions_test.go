@@ -158,3 +158,17 @@ func TestDeleteCache(t *testing.T) {
 		t.Errorf("err %v, sent %s %s", err, gotMethod, gotPath)
 	}
 }
+
+func TestDeleteRun(t *testing.T) {
+	var gotMethod, gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	err := DeleteRun(context.Background(), srv.Client(), srv.URL, "o/r", 16)
+	if err != nil || gotMethod != http.MethodDelete || gotPath != "/repos/o/r/actions/runs/16" {
+		t.Errorf("err %v, sent %s %s", err, gotMethod, gotPath)
+	}
+}
