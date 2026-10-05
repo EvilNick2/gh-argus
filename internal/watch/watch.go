@@ -171,10 +171,13 @@ type RunEvent struct {
 }
 
 // WatchRun polls the jobs of run id until ctx is done, for a screen showing
-// that run. It emits the jobs on the first successful poll and whenever they
+// that run. Attempt picks an earlier attempt, 0 the latest. It emits the jobs on the first successful poll and whenever they
 // change. While any job is unfinished, or none exist yet, it polls at Active.
-func (w *Watcher) WatchRun(ctx context.Context, repo string, id int64, out chan<- RunEvent) {
+func (w *Watcher) WatchRun(ctx context.Context, repo string, id int64, attempt int, out chan<- RunEvent) {
 	path := fmt.Sprintf("/repos/%s/actions/runs/%d/jobs?per_page=100", repo, id)
+	if attempt > 0 {
+		path = fmt.Sprintf("/repos/%s/actions/runs/%d/attempts/%d/jobs?per_page=100", repo, id, attempt)
+	}
 	var (
 		last     []runs.Job
 		have     bool

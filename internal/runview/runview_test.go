@@ -254,3 +254,32 @@ func TestWheelMovesBetweenJobs(t *testing.T) {
 		t.Errorf("wheel up did not go back:\n%s", v)
 	}
 }
+
+func TestSetAttemptLabelsHeaderAndReloadsJobs(t *testing.T) {
+	m := newModel(t).SetAttempt(1, 2)
+
+	v := view(m)
+	if !strings.Contains(strings.Split(v, "\n")[1], "attempt 1 of 2") {
+		t.Errorf("state line %q, want attempt 1 of 2", strings.Split(v, "\n")[1])
+	}
+	if !strings.Contains(v, "loading jobs") || strings.Contains(v, "Set up job") {
+		t.Errorf("jobs of the previous attempt kept:\n%s", v)
+	}
+}
+
+func TestLatestAttemptOfSeveralIsLabelled(t *testing.T) {
+	m := newModel(t).SetAttempt(0, 3)
+
+	if l := strings.Split(view(m), "\n")[1]; !strings.Contains(l, "attempt 3 of 3") {
+		t.Errorf("state line %q", l)
+	}
+}
+
+func TestEmptyEarlierAttemptSaysSo(t *testing.T) {
+	m := newModel(t).SetAttempt(1, 2)
+	m, _ = m.Update(watch.RunEvent{Jobs: []runs.Job{}})
+
+	if v := view(m); !strings.Contains(v, "no jobs in this attempt") {
+		t.Errorf("view:\n%s", v)
+	}
+}

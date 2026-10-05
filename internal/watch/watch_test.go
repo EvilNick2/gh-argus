@@ -71,6 +71,9 @@ func (s *runsServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.jobsHits++
 		etag = `"job-` + s.jobStatus + `"`
 		body = fmt.Sprintf(`{"jobs":[{"id":70,"run_id":7,"name":"build","status":%q}]}`, s.jobStatus)
+	case "/repos/o/r/actions/runs/7/attempts/1/jobs":
+		etag = `"attempt-1"`
+		body = `{"jobs":[{"id":60,"run_id":7,"run_attempt":1,"name":"build","status":"completed","conclusion":"failure"}]}`
 	default:
 		http.NotFound(w, r)
 		return
@@ -237,7 +240,7 @@ func startRunWatch(t *testing.T, s *runsServer) <-chan RunEvent {
 		Intervals: Intervals{Active: 5 * time.Millisecond, IdleMin: 5 * time.Millisecond, IdleMax: 5 * time.Millisecond},
 	}
 	events := make(chan RunEvent, 16)
-	go w.WatchRun(ctx, "o/r", 7, events)
+	go w.WatchRun(ctx, "o/r", 7, 0, events)
 	return events
 }
 
@@ -335,5 +338,23 @@ func TestChangeEventsCarryETag(t *testing.T) {
 	s.set("completed", "completed")
 	if ev := receive(t, events); ev.ETag != `"run-completed"` {
 		t.Errorf("change event ETag %q", ev.ETag)
+	}
+}
+
+func TestWatchRunOfAnEarlierAttempt(t *testing.T) {
+	srv := httptest.NewServer(&runsServer{status: "completed", jobStatus: "completed"})
+	t.Cleanup(srv.Close)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	w := &Watcher{
+		Fetcher:   fetch.New(srv.Client(), srv.URL),
+		Intervals: Intervals{Active: 5 * time.Millisecond, IdleMin: 5 * time.Millisecond, IdleMax: 5 * time.Millisecond},
+	}
+	events := make(chan RunEvent, 4)
+	go w.WatchRun(ctx, "o/r", 7, 1, events)
+
+	ev := receiveRun(t, events)
+	if ev.Err != nil || len(ev.Jobs) != 1 || ev.Jobs[0].ID != 60 || ev.Jobs[0].RunAttempt != 1 {
+		t.Errorf("got %+v, want attempt 1's job", ev)
 	}
 }

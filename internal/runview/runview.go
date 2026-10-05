@@ -34,6 +34,9 @@ type Model struct {
 	err    error
 	cursor int
 	now    func() time.Time
+	// attempt is the attempt shown, 0 for the latest, of attempts in all.
+	attempt  int
+	attempts int
 
 	width, height int
 }
@@ -121,8 +124,13 @@ func (m Model) View() string {
 	inner := max(10, m.width-2)
 	state := " " + theme.Icon(r.Status, r.Conclusion) + " " + theme.Text().Render(theme.StateWord(r.Status, r.Conclusion)) +
 		"  " + theme.Accent().UnsetBold().Render(r.HeadBranch)
-	if r.RunAttempt > 1 {
-		state += theme.Muted().Render(fmt.Sprintf("  attempt %d", r.RunAttempt))
+	total := max(m.attempts, r.RunAttempt)
+	if total > 1 {
+		shown := m.attempt
+		if shown == 0 {
+			shown = total
+		}
+		state += theme.Muted().Render(fmt.Sprintf("  attempt %d of %d", shown, total))
 	}
 	if m.err != nil {
 		state += "  " + theme.Fail().Render(m.err.Error())
@@ -144,7 +152,7 @@ func (m Model) body(nameW, inner int) ([]string, []int) {
 	if !m.loaded {
 		body, jobOf = append(body, theme.Muted().Render(" loading jobs")), append(jobOf, -1)
 	} else if len(m.jobs) == 0 {
-		body, jobOf = append(body, theme.Muted().Render(" no jobs yet")), append(jobOf, -1)
+		body, jobOf = append(body, theme.Muted().Render(m.noJobs())), append(jobOf, -1)
 	}
 	for i, j := range m.jobs {
 		row := " " + theme.Icon(j.Status, j.Conclusion) + " " + theme.Bold().Render(pad(j.Name, nameW)) + "  " +
@@ -172,6 +180,15 @@ func (m Model) body(nameW, inner int) ([]string, []int) {
 	}
 	end := min(len(body), offset+rows)
 	return body[offset:end], jobOf[offset:end]
+}
+
+// noJobs says why there are no jobs: an earlier attempt can have none,
+// while the latest may not have started them yet.
+func (m Model) noJobs() string {
+	if m.attempt > 0 {
+		return " no jobs in this attempt"
+	}
+	return " no jobs yet"
 }
 
 // layoutWidths are the job name and inner pane widths View lays out with.
@@ -212,4 +229,19 @@ func (m Model) Mouse(ev mouse.Event) (Model, tea.Cmd) {
 		return m, func() tea.Msg { return open }
 	}
 	return m, nil
+}
+
+// SetAttemptCount updates how many attempts the run has, as a rerun adds
+// one, without changing which attempt is shown.
+func (m Model) SetAttemptCount(total int) Model {
+	m.attempts = total
+	return m
+}
+
+// SetAttempt shows attempt of total, 0 meaning the latest, clearing the jobs
+// until the chosen attempt's arrive.
+func (m Model) SetAttempt(attempt, total int) Model {
+	m.attempt, m.attempts = attempt, total
+	m.jobs, m.loaded, m.cursor = nil, false, 0
+	return m
 }
