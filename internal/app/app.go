@@ -193,6 +193,8 @@ type Model struct {
 
 	confirm  *pending
 	help     bool
+	helpTop  int
+	last     lastClick
 	flash    string
 	flashErr bool
 
@@ -371,6 +373,9 @@ func (m Model) Init() tea.Cmd {
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.MouseClickMsg, tea.MouseWheelMsg:
+		return m.mouseMsg(msg)
+
 	case tea.BackgroundColorMsg:
 		theme.SetDark(msg.IsDark())
 		return m, nil
@@ -511,11 +516,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.quit()
 			case "?", "esc":
 				m.help = false
+			case "down", "j":
+				m.scrollHelp(1)
+			case "up", "k":
+				m.scrollHelp(-1)
+			case "home", "g":
+				m.helpTop = 0
+			case "end", "G":
+				m.scrollHelp(1 << 30)
 			}
 			return m, nil
 		}
 		if msg.String() == "?" && m.helpAvailable() {
-			m.help = true
+			m.help, m.helpTop = true, 0
 			return m, nil
 		}
 		if kind, ok := actionKeys[msg.String()]; ok && (m.screen == screenRun || m.screen == screenTabs && m.tab == 0) {
@@ -789,6 +802,19 @@ func (m Model) View() tea.View {
 	return m.frame(body, true, m.bodyHeight(), help)
 }
 
+// scrollHelp moves the key reference by d rows within its length.
+func (m *Model) scrollHelp(d int) {
+	m.helpTop = max(0, min(m.helpTop+d, helpMaxOffset(m.width, m.helpHeight())))
+}
+
+// helpHeight is the pane height the key reference is drawn in.
+func (m Model) helpHeight() int {
+	if m.screen == screenTabs {
+		return m.bodyHeight()
+	}
+	return m.runHeight()
+}
+
 // helpAvailable reports a screen where ? opens the key reference rather than
 // being typed.
 func (m Model) helpAvailable() bool {
@@ -811,25 +837,25 @@ func (m Model) frame(body string, withTabs bool, height int, help string) tea.Vi
 	}
 	lines := []string{theme.Bar(theme.Accent().Render(" argus")+theme.Muted().Render("  "+watching), m.requestsLeft(), m.width)}
 	if withTabs {
-		var tabLine []string
-		for i, t := range tabs {
-			label := fmt.Sprintf("[%d] %s", i+1, t)
+		var labels []string
+		for i := range tabs {
+			label := tabLabel(i)
 			if i == m.tab {
 				label = theme.Accent().Render(label)
 			} else {
 				label = theme.Muted().Render(label)
 			}
-			tabLine = append(tabLine, label)
+			labels = append(labels, label)
 		}
-		line := " " + strings.Join(tabLine, "   ")
+		line := " " + strings.Join(labels, "   ")
 		if m.err != nil {
 			line += "   " + theme.Fail().Render(m.err.Error())
 		}
 		lines = append(lines, line)
 	}
 	if m.help {
-		body = helpView(m.width, height)
-		help = "? or esc close  q quit"
+		body = helpView(m.width, height, m.helpTop)
+		help = "j/k scroll  ? or esc close  q quit"
 	}
 	content := strings.Split(body, "\n")
 	for len(content) < height {
@@ -840,6 +866,7 @@ func (m Model) frame(body string, withTabs bool, height int, help string) tea.Vi
 
 	v := tea.NewView(strings.Join(lines, "\n"))
 	v.AltScreen = true
+	v.MouseMode = tea.MouseModeCellMotion
 	return v
 }
 

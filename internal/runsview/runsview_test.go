@@ -9,6 +9,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/EvilNick2/gh-argus/internal/mouse"
 	"github.com/EvilNick2/gh-argus/internal/runs"
 	"github.com/EvilNick2/gh-argus/internal/watch"
 )
@@ -339,5 +340,79 @@ func TestRunWithoutCreationTimeShowsNoAge(t *testing.T) {
 
 	if l := runRow(t, m.View(), "#7"); strings.Contains(l, "ago") {
 		t.Errorf("row %q shows an age for a run with no creation time", l)
+	}
+}
+
+// Layout at 100x20 with two repos: the repos pane is 16 wide, so repo i is
+// at y 1+i inside it, and in the runs pane the status line is y 1 and run i
+// starts at y 2+2i.
+
+func click(x, y int) mouse.Event  { return mouse.Event{X: x, Y: y, Kind: mouse.Click} }
+func double(x, y int) mouse.Event { return mouse.Event{X: x, Y: y, Kind: mouse.DoubleClick} }
+
+func TestClickRepoSelectsIt(t *testing.T) {
+	m := newModel(t)
+
+	m, _ = m.Mouse(click(5, 2))
+	if repo, r, _ := m.Current(); repo != "EvilNick2/orpheus" || r.ID != 41 {
+		t.Errorf("Current() = %q %d, want orpheus run 41", repo, r.ID)
+	}
+}
+
+func TestClickRunSelectsAndFocusesRuns(t *testing.T) {
+	m := newModel(t)
+
+	m, cmd := m.Mouse(click(40, 4)) // second run's first line
+	if cmd != nil {
+		t.Error("single click opened something")
+	}
+	if _, r, _ := m.Current(); r.ID != 15 {
+		t.Errorf("Current() = %d, want 15", r.ID)
+	}
+	m, _ = m.Mouse(click(40, 5)) // its title line selects it too
+	if _, r, _ := m.Current(); r.ID != 15 {
+		t.Errorf("click on title line: Current() = %d, want 15", r.ID)
+	}
+	// Focus moved to the runs pane, so j moves the run cursor.
+	m, _ = send(m, key("k"))
+	if _, r, _ := m.Current(); r.ID != 16 {
+		t.Errorf("k after clicking a run moved to %d, want run 16", r.ID)
+	}
+}
+
+func TestDoubleClickRunOpensIt(t *testing.T) {
+	m := newModel(t)
+
+	_, cmd := m.Mouse(double(40, 2))
+	if cmd == nil {
+		t.Fatal("double click returned no command")
+	}
+	if msg, ok := cmd().(OpenRunMsg); !ok || msg.Run.ID != 16 {
+		t.Errorf("got %#v, want OpenRunMsg for run 16", cmd())
+	}
+}
+
+func TestClickOnEmptySpaceDoesNothing(t *testing.T) {
+	m := newModel(t)
+
+	m, cmd := m.Mouse(click(40, 15))
+	if cmd != nil {
+		t.Error("click below the runs returned a command")
+	}
+	if repo, r, _ := m.Current(); repo != "EvilNick2/dotfiles" || r.ID != 16 {
+		t.Errorf("Current() = %q %d, want unchanged", repo, r.ID)
+	}
+}
+
+func TestWheelMovesSelectionInPaneUnderPointer(t *testing.T) {
+	m := newModel(t)
+
+	m, _ = m.Mouse(mouse.Event{X: 40, Y: 5, Kind: mouse.WheelDown})
+	if repo, r, _ := m.Current(); repo != "EvilNick2/dotfiles" || r.ID != 15 {
+		t.Errorf("wheel over runs: %q %d, want dotfiles run 15", repo, r.ID)
+	}
+	m, _ = m.Mouse(mouse.Event{X: 5, Y: 5, Kind: mouse.WheelDown})
+	if repo, _, _ := m.Current(); repo != "EvilNick2/orpheus" {
+		t.Errorf("wheel over repos: %q, want orpheus", repo)
 	}
 }

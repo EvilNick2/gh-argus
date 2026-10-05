@@ -9,6 +9,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/EvilNick2/gh-argus/internal/mouse"
 	"github.com/EvilNick2/gh-argus/internal/runs"
 	"github.com/EvilNick2/gh-argus/internal/watch"
 )
@@ -199,5 +200,57 @@ func TestRunScreenIsOnePaneOfFullSize(t *testing.T) {
 	}
 	if !strings.HasPrefix(lines[0], "╭") || !strings.HasPrefix(lines[19], "╰") {
 		t.Errorf("not framed:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+// Inside the pane the state line is y 1 and a blank y 2, so jobs start at
+// y 3: check at 3, its three steps at 4 to 6, lint at 7.
+
+func TestClickJobSelectsIt(t *testing.T) {
+	m := newModel(t)
+
+	m, cmd := m.Mouse(mouse.Event{X: 10, Y: 7, Kind: mouse.Click})
+	if cmd != nil {
+		t.Error("single click opened something")
+	}
+	if v := view(m); !strings.Contains(v, "Lint step") {
+		t.Errorf("lint not selected:\n%s", v)
+	}
+}
+
+func TestDoubleClickJobOrStepOpensLog(t *testing.T) {
+	for _, y := range []int{3, 5} {
+		_, cmd := newModel(t).Mouse(mouse.Event{X: 10, Y: y, Kind: mouse.DoubleClick})
+		if cmd == nil {
+			t.Fatalf("y %d: no command", y)
+		}
+		if msg, ok := cmd().(OpenLogMsg); !ok || msg.Job.ID != 1 {
+			t.Errorf("y %d: got %#v, want OpenLogMsg for job 1", y, cmd())
+		}
+	}
+}
+
+func TestClickOutsideJobsDoesNothing(t *testing.T) {
+	for _, y := range []int{0, 1, 2, 15} {
+		m, cmd := newModel(t).Mouse(mouse.Event{X: 10, Y: y, Kind: mouse.DoubleClick})
+		if cmd != nil {
+			t.Errorf("y %d: returned a command", y)
+		}
+		if v := view(m); !strings.Contains(v, "Set up job") {
+			t.Errorf("y %d: selection moved", y)
+		}
+	}
+}
+
+func TestWheelMovesBetweenJobs(t *testing.T) {
+	m := newModel(t)
+
+	m, _ = m.Mouse(mouse.Event{X: 10, Y: 10, Kind: mouse.WheelDown})
+	if v := view(m); !strings.Contains(v, "Lint step") {
+		t.Errorf("wheel down did not select lint:\n%s", v)
+	}
+	m, _ = m.Mouse(mouse.Event{X: 10, Y: 10, Kind: mouse.WheelUp})
+	if v := view(m); !strings.Contains(v, "Set up job") {
+		t.Errorf("wheel up did not go back:\n%s", v)
 	}
 }

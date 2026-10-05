@@ -9,6 +9,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/sahilm/fuzzy"
 
+	"github.com/EvilNick2/gh-argus/internal/mouse"
 	"github.com/EvilNick2/gh-argus/internal/repos"
 	"github.com/EvilNick2/gh-argus/internal/theme"
 )
@@ -359,5 +360,32 @@ func (m Model) View() tea.View {
 	}
 	v := tea.NewView(strings.Join(lines, "\n"))
 	v.AltScreen = true
+	v.MouseMode = tea.MouseModeCellMotion
 	return v
+}
+
+// rowsTop is the screen row of the first repo: below the header bar, the
+// pane's border and the info line.
+const rowsTop = 3
+
+// Mouse moves the cursor to a clicked repo, ticks it on a double click or a
+// click on its box, and scrolls with the wheel. Coordinates are the screen's,
+// since the picker draws all of it.
+func (m Model) Mouse(ev mouse.Event) (Model, tea.Cmd) {
+	if d := ev.Wheel(); d != 0 {
+		m.cursor = max(0, min(len(m.visible)-1, m.cursor+d))
+		m.scroll()
+		return m, m.enrich()
+	}
+	i := m.offset + ev.Y - rowsTop
+	if !ev.Clicked() || ev.Y < rowsTop || ev.Y-rowsTop >= m.rows() || i >= len(m.visible) {
+		return m, nil
+	}
+	m.cursor = i
+	onBox := ev.X >= 2 && ev.X <= 4
+	if onBox || ev.Kind == mouse.DoubleClick {
+		name := m.repos[m.visible[i]].FullName
+		m.selected[name] = !m.selected[name]
+	}
+	return m, nil
 }

@@ -9,6 +9,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/EvilNick2/gh-argus/internal/mouse"
 	"github.com/EvilNick2/gh-argus/internal/workflows"
 )
 
@@ -207,5 +208,17 @@ func TestCursorVisibleWithManyTrailingReposWithout(t *testing.T) {
 	m, _ = m.Update(key("G"))
 	if v := view(m); !strings.Contains(v, "pages-build-deployment") {
 		t.Errorf("cursor scrolled out of view:\n%s", v)
+	}
+}
+
+func TestDoubleClickWorkflowActivates(t *testing.T) {
+	// dotfiles header at y 1, its workflows at y 2 to 4.
+	m, activated := newModel().Mouse(mouse.Event{X: 10, Y: 3, Kind: mouse.DoubleClick})
+
+	if !activated {
+		t.Error("double click did not activate")
+	}
+	if _, wf, _ := m.Current(); wf.ID != 2 {
+		t.Errorf("Current() = %d, want 2", wf.ID)
 	}
 }

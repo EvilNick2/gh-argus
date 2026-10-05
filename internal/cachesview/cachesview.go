@@ -12,6 +12,7 @@ import (
 
 	"github.com/EvilNick2/gh-argus/internal/caches"
 	"github.com/EvilNick2/gh-argus/internal/grouped"
+	"github.com/EvilNick2/gh-argus/internal/mouse"
 	"github.com/EvilNick2/gh-argus/internal/theme"
 	"github.com/EvilNick2/gh-argus/internal/timefmt"
 )
@@ -108,4 +109,10 @@ func (m Model) View() string {
 			return fmt.Sprintf("%d %s, %s", len(cs), noun, size(total))
 		},
 	})
+}
+
+// Mouse selects the row under a click and moves with the wheel.
+func (m Model) Mouse(ev mouse.Event) Model {
+	m.list, _ = m.list.Mouse(ev)
+	return m
 }

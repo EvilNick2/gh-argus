@@ -11,6 +11,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/EvilNick2/gh-argus/internal/mouse"
 	"github.com/EvilNick2/gh-argus/internal/theme"
 	"github.com/EvilNick2/gh-argus/internal/workflows"
 )
@@ -167,6 +168,14 @@ func (m Model) submit() (Model, tea.Cmd) {
 }
 
 func (m Model) View() string {
+	lines, _ := m.lines()
+	title := fmt.Sprintf("run %s on %s", m.wf.Name, m.fields[0].value)
+	return theme.Pane(title, strings.Join(lines, "\n"), m.width, m.height, true)
+}
+
+// lines lays out the form inside its pane, with the field each line belongs
+// to, a description belonging to its field, or -1.
+func (m Model) lines() ([]string, []int) {
 	inner := max(10, m.width-2)
 	lines := []string{" " + theme.Muted().Render(m.repo)}
 	if m.err != "" {
@@ -174,6 +183,7 @@ func (m Model) View() string {
 	} else {
 		lines = append(lines, "")
 	}
+	fieldOf := []int{-1, -1}
 	nameW := 0
 	for _, f := range m.fields {
 		nameW = max(nameW, len(f.in.Name)+1)
@@ -208,16 +218,41 @@ func (m Model) View() string {
 		if i == m.cursor {
 			row = theme.Selected(row, inner)
 		}
-		lines = append(lines, row)
+		lines, fieldOf = append(lines, row), append(fieldOf, i)
 		if f.in.Description != "" {
 			for _, d := range strings.Split(ansi.Wordwrap(f.in.Description, max(10, inner-4), " "), "\n") {
-				lines = append(lines, "   "+theme.Muted().Render(d))
+				lines, fieldOf = append(lines, "   "+theme.Muted().Render(d)), append(fieldOf, i)
 			}
 		}
 	}
 	if len(m.fields) == 1 {
 		lines = append(lines, "", " "+theme.Muted().Render("no inputs"))
+		fieldOf = append(fieldOf, -1, -1)
 	}
-	title := fmt.Sprintf("run %s on %s", m.wf.Name, m.fields[0].value)
-	return theme.Pane(title, strings.Join(lines, "\n"), m.width, m.height, true)
+	return lines, fieldOf
+}
+
+// Mouse focuses the field under a click, its description included, and on a
+// double click toggles a boolean or steps a choice. The wheel moves focus.
+func (m Model) Mouse(ev mouse.Event) (Model, tea.Cmd) {
+	if d := ev.Wheel(); d != 0 {
+		m.cursor = max(0, min(len(m.fields)-1, m.cursor+d))
+		return m, nil
+	}
+	// Lines sit inside the pane's border.
+	_, fieldOf := m.lines()
+	i := ev.Y - 1
+	if !ev.Clicked() || i < 0 || i >= len(fieldOf) || fieldOf[i] < 0 {
+		return m, nil
+	}
+	m.cursor = fieldOf[i]
+	if ev.Kind == mouse.DoubleClick {
+		switch m.fields[m.cursor].in.Type {
+		case "boolean":
+			return m.Update(tea.KeyPressMsg{Code: tea.KeySpace, Text: " "})
+		case "choice":
+			return m.Update(tea.KeyPressMsg{Code: tea.KeyRight})
+		}
+	}
+	return m, nil
 }

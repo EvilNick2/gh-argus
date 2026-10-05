@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/EvilNick2/gh-argus/internal/metrics"
+	"github.com/EvilNick2/gh-argus/internal/mouse"
 	"github.com/EvilNick2/gh-argus/internal/runs"
 	"github.com/EvilNick2/gh-argus/internal/theme"
 	"github.com/EvilNick2/gh-argus/internal/timefmt"
@@ -72,6 +73,54 @@ func (m Model) items() []item {
 		}
 	}
 	return out
+}
+
+// rowItems gives, for each row below the column header, the index of the
+// selectable item on it, or -1 for a status row such as loading. View draws
+// rows in the same order.
+func (m Model) rowItems() []int {
+	var out []int
+	idx := 0
+	for _, r := range m.repos {
+		st := m.state[r]
+		if st.err != nil || !st.loaded || st.total.Runs == 0 {
+			out = append(out, -1)
+			continue
+		}
+		for range len(st.per) + 1 {
+			out = append(out, idx)
+			idx++
+		}
+	}
+	return out
+}
+
+// offset is the first row shown, keeping the cursor in the rows that fit
+// between the column header and the detail line.
+func (m Model) offset() int {
+	body := max(1, m.height-4)
+	for i, it := range m.rowItems() {
+		if it == m.cursor && i >= body {
+			return i - body + 1
+		}
+	}
+	return 0
+}
+
+// Mouse selects the row under a click and moves with the wheel.
+func (m Model) Mouse(ev mouse.Event) (Model, tea.Cmd) {
+	n := len(m.items())
+	if d := ev.Wheel(); d != 0 {
+		m.cursor = max(0, min(n-1, m.cursor+d))
+		return m, nil
+	}
+	// Rows start below the border and the column header.
+	rows := m.rowItems()
+	i := m.offset() + ev.Y - 2
+	if ev.Clicked() && ev.Y >= 2 && ev.Y < m.height-2 && i < len(rows) && rows[i] >= 0 {
+		m.cursor = rows[i]
+	}
+	return m, nil
 }
 
 func (m Model) stat(it item) metrics.Stat {
@@ -167,7 +216,7 @@ func (m Model) View() string {
 
 	items := m.items()
 	var rows []string
-	cursorRow, idx := 0, 0
+	idx := 0
 	for _, r := range m.repos {
 		st := m.state[r]
 		name := pad(truncate(r, nameW), nameW)
@@ -189,7 +238,7 @@ func (m Model) View() string {
 			}
 			row := " " + label + theme.Text().Render(columns(s)) + glyphs(s.History)
 			if idx == m.cursor {
-				row, cursorRow = theme.Selected(row, inner), len(rows)
+				row = theme.Selected(row, inner)
 			}
 			rows = append(rows, row)
 			idx++
@@ -198,10 +247,7 @@ func (m Model) View() string {
 
 	// The pane holds the column header, the rows and a detail line.
 	body := max(1, m.height-4)
-	offset := 0
-	if cursorRow >= body {
-		offset = cursorRow - body + 1
-	}
+	offset := m.offset()
 	rows = rows[offset:min(len(rows), offset+body)]
 	for len(rows) < body {
 		rows = append(rows, "")

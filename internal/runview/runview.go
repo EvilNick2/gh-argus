@@ -10,6 +10,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/EvilNick2/gh-argus/internal/mouse"
 	"github.com/EvilNick2/gh-argus/internal/runs"
 	"github.com/EvilNick2/gh-argus/internal/theme"
 	"github.com/EvilNick2/gh-argus/internal/timefmt"
@@ -127,23 +128,23 @@ func (m Model) View() string {
 		state += "  " + theme.Fail().Render(m.err.Error())
 	}
 
-	nameW := 10
-	for _, j := range m.jobs {
-		nameW = max(nameW, ansi.StringWidth(j.Name))
-	}
-	if len(m.jobs) > 0 {
-		for _, s := range m.jobs[m.cursor].Steps {
-			nameW = max(nameW, ansi.StringWidth(s.Name)+5)
-		}
-	}
-	nameW = min(nameW, max(10, inner-16))
+	nameW, _ := m.layoutWidths()
+	body, _ := m.body(nameW, inner)
+	title := fmt.Sprintf("%s  #%d %s", m.repo, r.RunNumber, r.Name)
+	return theme.Pane(title, strings.Join(append([]string{state, ""}, body...), "\n"), m.width, m.height, true)
+}
 
+// body lays out the visible job and step lines below the state line, with
+// the job each line belongs to, scrolled so the cursor job shows with as
+// many of its steps as fit.
+func (m Model) body(nameW, inner int) ([]string, []int) {
 	var body []string
+	var jobOf []int
 	cursorLine, steps := 0, 0
 	if !m.loaded {
-		body = append(body, theme.Muted().Render(" loading jobs"))
+		body, jobOf = append(body, theme.Muted().Render(" loading jobs")), append(jobOf, -1)
 	} else if len(m.jobs) == 0 {
-		body = append(body, theme.Muted().Render(" no jobs yet"))
+		body, jobOf = append(body, theme.Muted().Render(" no jobs yet")), append(jobOf, -1)
 	}
 	for i, j := range m.jobs {
 		row := " " + theme.Icon(j.Status, j.Conclusion) + " " + theme.Bold().Render(pad(j.Name, nameW)) + "  " +
@@ -151,7 +152,7 @@ func (m Model) View() string {
 		if i == m.cursor {
 			row, cursorLine = theme.Selected(row, inner), len(body)
 		}
-		body = append(body, row)
+		body, jobOf = append(body, row), append(jobOf, i)
 		if i != m.cursor {
 			continue
 		}
@@ -160,22 +161,55 @@ func (m Model) View() string {
 			label := pad(fmt.Sprintf("%2d %s", s.Number, s.Name), nameW-2)
 			body = append(body, "     "+theme.Icon(s.Status, s.Conclusion)+" "+theme.Text().Render(label)+"  "+
 				theme.Muted().Render(m.elapsed(s.StartedAt, s.CompletedAt)))
+			jobOf = append(jobOf, i)
 		}
 	}
 
-	// Scroll so the cursor job is visible, with as many of its steps as fit
-	// below the state line and a blank line.
 	rows := max(1, m.height-4)
 	offset := 0
 	if last := cursorLine + steps; last >= rows {
 		offset = min(cursorLine, last-rows+1)
 	}
-	body = body[offset:min(len(body), offset+rows)]
+	end := min(len(body), offset+rows)
+	return body[offset:end], jobOf[offset:end]
+}
 
-	title := fmt.Sprintf("%s  #%d %s", m.repo, r.RunNumber, r.Name)
-	return theme.Pane(title, strings.Join(append([]string{state, ""}, body...), "\n"), m.width, m.height, true)
+// layoutWidths are the job name and inner pane widths View lays out with.
+func (m Model) layoutWidths() (nameW, inner int) {
+	inner = max(10, m.width-2)
+	nameW = 10
+	for _, j := range m.jobs {
+		nameW = max(nameW, ansi.StringWidth(j.Name))
+	}
+	if len(m.jobs) > 0 {
+		for _, s := range m.jobs[m.cursor].Steps {
+			nameW = max(nameW, ansi.StringWidth(s.Name)+5)
+		}
+	}
+	return min(nameW, max(10, inner-16)), inner
 }
 
 func pad(s string, n int) string {
 	return s + strings.Repeat(" ", max(0, n-ansi.StringWidth(s)))
+}
+
+// Mouse selects the job under a click, opens its log on a double click,
+// including on one of its steps, and moves between jobs with the wheel.
+func (m Model) Mouse(ev mouse.Event) (Model, tea.Cmd) {
+	if d := ev.Wheel(); d != 0 {
+		m.cursor = max(0, min(len(m.jobs)-1, m.cursor+d))
+		return m, nil
+	}
+	// Job lines start below the border, the state line and a blank line.
+	_, jobOf := m.body(m.layoutWidths())
+	i := ev.Y - 3
+	if !ev.Clicked() || i < 0 || i >= len(jobOf) || jobOf[i] < 0 {
+		return m, nil
+	}
+	m.cursor = jobOf[i]
+	if ev.Kind == mouse.DoubleClick {
+		open := OpenLogMsg{Repo: m.repo, Job: m.jobs[m.cursor]}
+		return m, func() tea.Msg { return open }
+	}
+	return m, nil
 }

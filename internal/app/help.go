@@ -51,6 +51,13 @@ var helpRight = []helpSection{
 	{"Cache", [][2]string{
 		{"d", "delete the cache"},
 	}},
+	{"Mouse", [][2]string{
+		{"click", "select, or switch tab"},
+		{"double-click", "open, run or tick"},
+		{"wheel", "move the selection, scroll a log"},
+		{"back button", "go back"},
+		{"shift+drag", "select text to copy"},
+	}},
 }
 
 func helpColumn(sections []helpSection) []string {
@@ -61,7 +68,7 @@ func helpColumn(sections []helpSection) []string {
 		}
 		out = append(out, " "+theme.Bold().Render(s.title))
 		for _, k := range s.keys {
-			out = append(out, "   "+theme.Accent().UnsetBold().Render(pad(k[0], 8))+theme.Text().Render(k[1]))
+			out = append(out, "   "+theme.Accent().UnsetBold().Render(pad(k[0], 13))+theme.Text().Render(k[1]))
 		}
 	}
 	return out
@@ -71,8 +78,8 @@ func pad(s string, n int) string {
 	return s + strings.Repeat(" ", max(0, n-ansi.StringWidth(s)))
 }
 
-// helpView is the key reference, in two columns inside a pane.
-func helpView(width, height int) string {
+// helpRows lays out the key reference in two columns.
+func helpRows(width int) []string {
 	left, right := helpColumn(helpLeft), helpColumn(helpRight)
 	colW := max(40, (width-2)/2)
 	var rows []string
@@ -86,5 +93,18 @@ func helpView(width, height int) string {
 		}
 		rows = append(rows, pad(l, colW)+r)
 	}
-	return theme.Pane("keys", strings.Join(rows, "\n"), width, height, true)
+	return rows
+}
+
+// helpMaxOffset is the furthest the key reference scrolls in a pane of
+// width by height.
+func helpMaxOffset(width, height int) int {
+	return max(0, len(helpRows(width))-(height-2))
+}
+
+// helpView is the key reference inside a pane, scrolled down offset rows.
+func helpView(width, height, offset int) string {
+	rows := helpRows(width)
+	offset = max(0, min(offset, helpMaxOffset(width, height)))
+	return theme.Pane("keys", strings.Join(rows[offset:], "\n"), width, height, true)
 }

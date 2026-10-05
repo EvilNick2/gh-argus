@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/EvilNick2/gh-argus/internal/caches"
+	"github.com/EvilNick2/gh-argus/internal/mouse"
 )
 
 var now = time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
@@ -81,5 +82,14 @@ func TestSize(t *testing.T) {
 		if got := size(n); got != want {
 			t.Errorf("size(%d) = %q, want %q", n, got, want)
 		}
+	}
+}
+
+func TestClickSelectsCache(t *testing.T) {
+	// orpheus header at y 1, its caches at y 2 and 3.
+	m := newModel().Mouse(mouse.Event{X: 10, Y: 3, Kind: mouse.DoubleClick})
+
+	if _, c, _ := m.Current(); c.ID != 2 {
+		t.Errorf("Current() = %d, want 2", c.ID)
 	}
 }

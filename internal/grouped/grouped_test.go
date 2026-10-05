@@ -8,6 +8,7 @@ import (
 
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/EvilNick2/gh-argus/internal/mouse"
 	"github.com/EvilNick2/gh-argus/internal/theme"
 )
 
@@ -215,5 +216,63 @@ func TestSelectedRowIsHighlightedAcrossThePane(t *testing.T) {
 
 	if !strings.Contains(raw, theme.Selected("> a1", 78)) {
 		t.Errorf("selected row not highlighted across the pane's inner width: %q", raw)
+	}
+}
+
+// Inside the pane: o/a header at y 1, a1 to a3 at y 2 to 4, o/b header at
+// y 5, b1 at y 6.
+
+func TestClickSelectsItemUnderPointer(t *testing.T) {
+	m, activated := loaded().Mouse(mouse.Event{X: 5, Y: 6, Kind: mouse.Click})
+
+	if activated {
+		t.Error("single click activated")
+	}
+	if repo, it, _ := m.Current(); repo != "o/b" || it.id != 4 {
+		t.Errorf("Current() = %q %v, want b1", repo, it)
+	}
+}
+
+func TestDoubleClickActivatesItem(t *testing.T) {
+	m, activated := loaded().Mouse(mouse.Event{X: 5, Y: 3, Kind: mouse.DoubleClick})
+
+	if !activated {
+		t.Error("double click did not activate")
+	}
+	if _, it, _ := m.Current(); it.id != 2 {
+		t.Errorf("Current() = %v, want a2", it)
+	}
+}
+
+func TestClickOnHeaderOrBorderSelectsNothing(t *testing.T) {
+	for _, y := range []int{0, 1, 5, 9, 19} {
+		m, activated := loaded().Mouse(mouse.Event{X: 5, Y: y, Kind: mouse.DoubleClick})
+		if _, it, _ := m.Current(); activated || it.id != 1 {
+			t.Errorf("y %d: activated %v, Current() %v", y, activated, it)
+		}
+	}
+}
+
+func TestClickAccountsForScroll(t *testing.T) {
+	var many []thing
+	for i := range 30 {
+		many = append(many, thing{int64(i), fmt.Sprintf("t%02d", i)})
+	}
+	m := newModel(6, "o/a").Load("o/a", many, nil)
+	for range 20 {
+		m = m.Key("j")
+	}
+	// 4 rows fit, showing t17 to t20, so t18 is at y 2.
+	m, _ = m.Mouse(mouse.Event{X: 5, Y: 2, Kind: mouse.Click})
+	if _, it, _ := m.Current(); it.id != 18 {
+		t.Errorf("Current() = %v, want t18", it)
+	}
+}
+
+func TestWheelMovesSelection(t *testing.T) {
+	m, _ := loaded().Mouse(mouse.Event{X: 5, Y: 3, Kind: mouse.WheelDown})
+
+	if _, it, _ := m.Current(); it.id != 2 {
+		t.Errorf("Current() = %v, want a2", it)
 	}
 }

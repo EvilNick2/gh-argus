@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/EvilNick2/gh-argus/internal/fetch"
+	"github.com/EvilNick2/gh-argus/internal/mouse"
 	"github.com/EvilNick2/gh-argus/internal/runners"
 	"github.com/EvilNick2/gh-argus/internal/theme"
 )
@@ -79,5 +80,16 @@ func TestNoRunners(t *testing.T) {
 	m, _ = m.Update(LoadedMsg{Repo: "The-Psychward/music", Runners: []runners.Runner{}})
 	if v := view(m); !strings.Contains(v, "no self-hosted runners") {
 		t.Errorf("view:\n%s", v)
+	}
+}
+
+func TestWheelMovesBetweenRunners(t *testing.T) {
+	other := runners.Runner{ID: 22, Name: "builder", OS: "Windows", Status: "online"}
+	m := New([]string{"EvilNick2/infra"}).SetSize(100, 20)
+	m, _ = m.Update(LoadedMsg{Repo: "EvilNick2/infra", Runners: []runners.Runner{relay, other}})
+
+	m = m.Mouse(mouse.Event{X: 10, Y: 5, Kind: mouse.WheelDown})
+	if _, r, _ := m.list.Current(); r.ID != 22 {
+		t.Errorf("selected runner %d after wheel down, want 22", r.ID)
 	}
 }

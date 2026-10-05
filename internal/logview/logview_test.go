@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/EvilNick2/gh-argus/internal/joblog"
+	"github.com/EvilNick2/gh-argus/internal/mouse"
 	"github.com/EvilNick2/gh-argus/internal/runs"
 	"github.com/EvilNick2/gh-argus/internal/theme"
 )
@@ -339,5 +340,19 @@ func TestEndStartsOnALineBoundary(t *testing.T) {
 	}
 	if !strings.Contains(v, "line9") {
 		t.Errorf("last line not shown:\n%s", v)
+	}
+}
+
+func TestWheelScrollsThreeLines(t *testing.T) {
+	m := newModel(numbered(50), 80, 10)
+	m = send(m, key("g"))
+
+	m, _ = m.Mouse(mouse.Event{X: 5, Y: 5, Kind: mouse.WheelDown})
+	if v := view(m); !shows(v, "line 3") || shows(v, "line 2") {
+		t.Errorf("wheel down:\n%s", v)
+	}
+	m, _ = m.Mouse(mouse.Event{X: 5, Y: 5, Kind: mouse.WheelUp})
+	if v := view(m); !shows(v, "line 0") {
+		t.Errorf("wheel up:\n%s", v)
 	}
 }

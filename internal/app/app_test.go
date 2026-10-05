@@ -47,6 +47,7 @@ type fakeWatch struct {
 
 	seeds     map[string]*watch.Seed
 	remaining int
+	clock     time.Time
 
 	wfCalls []string
 	wfs     map[string][]workflows.Workflow
@@ -132,7 +133,12 @@ func (f *fakeWatch) deps() Deps {
 			f.wfSets = append(f.wfSets, fmt.Sprintf("%s/%d %v", repo, id, enabled))
 			return nil
 		},
-		Now: func() time.Time { return time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC) },
+		Now: func() time.Time {
+			if f.clock.IsZero() {
+				return time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)
+			}
+			return f.clock
+		},
 	}
 }
 
@@ -1054,6 +1060,11 @@ func TestQuestionMarkTogglesHelp(t *testing.T) {
 	if !strings.Contains(v, "keys") || !strings.Contains(v, "rerun failed jobs") || !strings.Contains(v, "Workflows") {
 		t.Fatalf("help not shown:\n%s", v)
 	}
+	m, _ = step(m, keyMsg("G"))
+	if v := view(m); !strings.Contains(v, "double-click") || !strings.Contains(v, "shift+drag") {
+		t.Errorf("G did not scroll help to the mouse keys:\n%s", v)
+	}
+	m, _ = step(m, keyMsg("g"))
 	m, _ = step(m, keyMsg("?"))
 	if v := view(m); strings.Contains(v, "rerun failed jobs") {
 		t.Errorf("? did not close help:\n%s", v)
@@ -1108,5 +1119,201 @@ func TestStatusBarDropsLegendBeforeHints(t *testing.T) {
 	lines = strings.Split(view(narrow), "\n")
 	if last := lines[len(lines)-1]; strings.Contains(last, "+ pass") || !strings.Contains(last, "tab pane") {
 		t.Errorf("narrow status bar %q, want hints without the legend", last)
+	}
+}
+
+func leftClick(x, y int) tea.Msg {
+	return tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft}
+}
+
+func TestMouseIsEnabled(t *testing.T) {
+	f := &fakeWatch{}
+	m := sized(New(f.deps(), newPicker(), []string{"o/a"}))
+
+	if mode := m.View().MouseMode; mode != tea.MouseModeCellMotion {
+		t.Errorf("MouseMode = %v, want cell motion", mode)
+	}
+}
+
+func TestClickTabSwitchesTab(t *testing.T) {
+	f := &fakeWatch{wfs: map[string][]workflows.Workflow{"o/a": {buildWF}}}
+	m := sized(New(f.deps(), newPicker(), []string{"o/a"}))
+
+	// The tab line is " [1] Runs   [2] Workflows ...", so x 16 is on [2].
+	m, cmd := step(m, leftClick(16, 1))
+	m = runAll(m, cmd)
+	if v := view(m); !strings.Contains(v, "Build and publish") {
+		t.Errorf("click on [2] did not open Workflows:\n%s", v)
+	}
+}
+
+func TestDoubleClickRunOpensRunScreen(t *testing.T) {
+	f := &fakeWatch{}
+	m := onRunsTab(t, f)
+	f.clock = time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)
+
+	// The runs pane starts two lines down, its first run two rows into it.
+	m, _ = step(m, leftClick(40, 4))
+	f.clock = f.clock.Add(200 * time.Millisecond)
+	m, cmd := step(m, leftClick(40, 4))
+	if cmd == nil {
+		t.Fatal("double click returned no command")
+	}
+	m, _ = step(m, cmd())
+	if len(f.runCalls) != 1 || f.runCalls[0] != "o/r/16" {
+		t.Errorf("run watch calls %v, want run 16 opened", f.runCalls)
+	}
+}
+
+func TestSlowSecondClickIsNotADoubleClick(t *testing.T) {
+	f := &fakeWatch{}
+	m := onRunsTab(t, f)
+	f.clock = time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)
+
+	m, _ = step(m, leftClick(40, 4))
+	f.clock = f.clock.Add(time.Second)
+	_, cmd := step(m, leftClick(40, 4))
+	if cmd != nil {
+		t.Errorf("two clicks a second apart opened something: %#v", cmd())
+	}
+}
+
+func TestWheelOnRunsTab(t *testing.T) {
+	f := &fakeWatch{}
+	m := sized(New(f.deps(), newPicker(), []string{"o/a", "o/b"}))
+
+	m, _ = step(m, tea.MouseWheelMsg{X: 5, Y: 5, Button: tea.MouseWheelDown})
+	if v := view(m); !strings.Contains(v, "─ o/b ") {
+		t.Errorf("wheel over repos did not select o/b:\n%s", v)
+	}
+}
+
+func TestMouseBackButtonLeavesRunScreen(t *testing.T) {
+	f := &fakeWatch{}
+	m, _ := onRunScreen(t, f)
+
+	m, cmd := step(m, tea.MouseClickMsg{X: 10, Y: 10, Button: tea.MouseBackward})
+	m = runAll(m, cmd)
+	if v := view(m); !strings.Contains(v, "[1] Runs") {
+		t.Errorf("back button did not return to tabs:\n%s", v)
+	}
+}
+
+func TestMouseIgnoredWhilePromptIsUp(t *testing.T) {
+	f := &fakeWatch{}
+	m := onRunsTab(t, f)
+	f.clock = time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)
+
+	m, _ = step(m, keyMsg("r"))
+	m, _ = step(m, leftClick(16, 1))
+	if v := view(m); !strings.Contains(v, "y/n") || strings.Contains(v, "loading") {
+		t.Errorf("click acted while the prompt was up:\n%s", v)
+	}
+}
+
+func TestClickClosesHelp(t *testing.T) {
+	f := &fakeWatch{}
+	m := sized(New(f.deps(), newPicker(), []string{"o/a"}))
+
+	m, _ = step(m, keyMsg("?"))
+	m, _ = step(m, leftClick(30, 10))
+	if v := view(m); strings.Contains(v, "rerun failed jobs") {
+		t.Errorf("click did not close help:\n%s", v)
+	}
+}
+
+func TestDoubleClickWorkflowStartsDispatch(t *testing.T) {
+	f := &fakeWatch{
+		wfs:   map[string][]workflows.Workflow{"o/a": {buildWF}},
+		specs: map[int64]workflows.DispatchSpec{1: {Dispatchable: true}},
+		clock: time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC),
+	}
+	m := onWorkflowsTab(t, f)
+
+	// Below the tab line: the pane border, the o/a header, then the workflow.
+	m, _ = step(m, leftClick(10, 4))
+	f.clock = f.clock.Add(100 * time.Millisecond)
+	m, cmd := step(m, leftClick(10, 4))
+	m = runAll(m, cmd)
+	if v := view(m); !strings.Contains(v, "run Build and publish on main? y/n") {
+		t.Errorf("double click did not offer to dispatch:\n%s", v)
+	}
+}
+
+func TestClickSelectsCacheThenDeleteUsesIt(t *testing.T) {
+	f := &fakeWatch{caches: map[string][]caches.Cache{"o/a": {
+		{ID: 1, Key: "first", Ref: "refs/heads/main"},
+		{ID: 2, Key: "second", Ref: "refs/heads/main"},
+	}}}
+	m := sized(New(f.deps(), newPicker(), []string{"o/a"}))
+	m, cmd := step(m, keyMsg("4"))
+	m = runAll(m, cmd)
+
+	m, _ = step(m, leftClick(10, 5))
+	m, _ = step(m, keyMsg("d"))
+	if v := view(m); !strings.Contains(v, "delete cache second from o/a? y/n") {
+		t.Errorf("view:\n%s", v)
+	}
+}
+
+func TestWheelOnMetricsAndRunners(t *testing.T) {
+	f := &fakeWatch{}
+	m := sized(New(f.deps(), newPicker(), []string{"o/a"}))
+	for _, tab := range []string{"3", "5"} {
+		var cmd tea.Cmd
+		m, cmd = step(m, keyMsg(tab))
+		m = runAll(m, cmd)
+		// Must not panic or act with nothing to select.
+		m, _ = step(m, tea.MouseWheelMsg{X: 10, Y: 6, Button: tea.MouseWheelDown})
+		m, _ = step(m, leftClick(10, 6))
+	}
+}
+
+func TestMouseInPickerTicksRepos(t *testing.T) {
+	f := &fakeWatch{clock: time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)}
+	m := sized(New(f.deps(), newPicker(), nil))
+
+	// orpheus is the second row, at screen y 4, its box at x 2 to 4.
+	m, _ = step(m, leftClick(3, 4))
+	m, cmd := step(m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	m, _ = step(m, cmd())
+	if len(f.calls) != 1 || !slices.Equal(f.calls[0], []string{"EvilNick2/orpheus"}) {
+		t.Errorf("watch calls %v, want orpheus ticked by the click", f.calls)
+	}
+}
+
+func TestDoubleClickBooleanInForm(t *testing.T) {
+	f := &fakeWatch{
+		wfs:   map[string][]workflows.Workflow{"o/a": {needyWF}},
+		specs: map[int64]workflows.DispatchSpec{5: {Dispatchable: true, Inputs: []workflows.Input{{Name: "force", Type: "boolean", Default: "false"}}}},
+		clock: time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC),
+	}
+	m := openForm(t, f, keyMsg("i"))
+
+	// Below the header bar: border, repo, blank, branch, then force at y 5.
+	m, _ = step(m, leftClick(10, 5))
+	f.clock = f.clock.Add(100 * time.Millisecond)
+	m, _ = step(m, leftClick(10, 5))
+	m, cmd := step(m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	runAll(m, cmd)
+	if len(f.dispatches) != 1 || f.dispatches[0] != "o/a/5@main map[force:true]" {
+		t.Errorf("dispatches %v", f.dispatches)
+	}
+}
+
+func TestWheelScrollsHelpAndClickCloses(t *testing.T) {
+	f := &fakeWatch{}
+	m := sized(New(f.deps(), newPicker(), []string{"o/a"}))
+
+	m, _ = step(m, keyMsg("?"))
+	for range 20 {
+		m, _ = step(m, tea.MouseWheelMsg{X: 30, Y: 10, Button: tea.MouseWheelDown})
+	}
+	if v := view(m); !strings.Contains(v, "shift+drag") {
+		t.Errorf("wheel did not scroll help:\n%s", v)
+	}
+	m, _ = step(m, leftClick(30, 10))
+	if v := view(m); strings.Contains(v, "shift+drag") {
+		t.Error("click did not close help")
 	}
 }

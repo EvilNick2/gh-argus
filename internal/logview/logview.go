@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/EvilNick2/gh-argus/internal/joblog"
+	"github.com/EvilNick2/gh-argus/internal/mouse"
 	"github.com/EvilNick2/gh-argus/internal/runs"
 	"github.com/EvilNick2/gh-argus/internal/theme"
 )
@@ -333,4 +334,13 @@ func (m Model) View() string {
 		}
 	}
 	return theme.Pane(m.repo+"  "+j.Name, strings.Join(out, "\n"), m.width, m.height, true)
+}
+
+// Mouse scrolls the log three rows per wheel step.
+func (m Model) Mouse(ev mouse.Event) (Model, tea.Cmd) {
+	if d := ev.Wheel(); d != 0 {
+		m.top += 3 * d
+		m.clamp()
+	}
+	return m, nil
 }

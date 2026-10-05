@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/EvilNick2/gh-argus/internal/grouped"
+	"github.com/EvilNick2/gh-argus/internal/mouse"
 	"github.com/EvilNick2/gh-argus/internal/theme"
 	"github.com/EvilNick2/gh-argus/internal/workflows"
 )
@@ -85,4 +86,12 @@ func (m Model) View() string {
 		Row:   func(w workflows.Workflow, _ bool) string { return row(w, nameW) },
 		Empty: "no workflows",
 	})
+}
+
+// Mouse selects the workflow under a click and moves with the wheel. It
+// reports a double click on a workflow as activated, which dispatches it.
+func (m Model) Mouse(ev mouse.Event) (Model, bool) {
+	var activated bool
+	m.list, activated = m.list.Mouse(ev)
+	return m, activated
 }

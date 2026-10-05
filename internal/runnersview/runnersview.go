@@ -13,6 +13,7 @@ import (
 
 	"github.com/EvilNick2/gh-argus/internal/fetch"
 	"github.com/EvilNick2/gh-argus/internal/grouped"
+	"github.com/EvilNick2/gh-argus/internal/mouse"
 	"github.com/EvilNick2/gh-argus/internal/runners"
 	"github.com/EvilNick2/gh-argus/internal/theme"
 )
@@ -83,4 +84,10 @@ func (m Model) View() string {
 		Empty: "no self-hosted runners",
 		Error: notPermitted,
 	})
+}
+
+// Mouse selects the row under a click and moves with the wheel.
+func (m Model) Mouse(ev mouse.Event) Model {
+	m.list, _ = m.list.Mouse(ev)
+	return m
 }

@@ -8,6 +8,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/EvilNick2/gh-argus/internal/mouse"
 	"github.com/EvilNick2/gh-argus/internal/workflows"
 )
 
@@ -292,5 +293,53 @@ func TestFormIsOnePaneOfFullSize(t *testing.T) {
 	}
 	if !strings.Contains(lines[0], "run Publish embedder on main") {
 		t.Errorf("title %q", lines[0])
+	}
+}
+
+// Inside the pane: repo at y 1, a blank at y 2, then branch at y 3, tag at
+// y 4 with its description at y 5, force at y 6 with its description at
+// y 7, level at y 8, count at y 9.
+
+func mouseAt(y int, k mouse.Kind) mouse.Event { return mouse.Event{X: 10, Y: y, Kind: k} }
+
+func TestClickFocusesFieldAndDoubleTogglesBoolean(t *testing.T) {
+	m, _ := newModel(inputs).Mouse(mouseAt(6, mouse.Click))
+	m, _ = send(m, key("space"))
+	m, _ = m.Mouse(mouseAt(6, mouse.DoubleClick))
+	m, _ = m.Mouse(mouseAt(6, mouse.DoubleClick))
+	_, cmd := send(m, key("enter"))
+
+	if got := submitted(t, cmd)["force"]; got != "true" {
+		t.Errorf("force %q, want true after space then two toggles", got)
+	}
+}
+
+func TestDoubleClickCyclesChoice(t *testing.T) {
+	m, _ := newModel(inputs).Mouse(mouseAt(8, mouse.DoubleClick))
+	_, cmd := send(m, key("enter"))
+
+	if got := submitted(t, cmd)["level"]; got != "debug" {
+		t.Errorf("level %q, want debug", got)
+	}
+}
+
+func TestClickDescriptionFocusesItsField(t *testing.T) {
+	m, _ := send(newModel(inputs), key("tab"), key("tab")) // focus on level
+	m, _ = m.Mouse(mouseAt(5, mouse.Click))
+	m, _ = send(m, typed("x")...)
+	_, cmd := send(m, key("enter"))
+
+	if got := submitted(t, cmd)["tag"]; got != "x" {
+		t.Errorf("tag %q, want typing to go to the field whose description was clicked", got)
+	}
+}
+
+func TestWheelMovesFocus(t *testing.T) {
+	m, _ := newModel(inputs).Mouse(mouseAt(5, mouse.WheelDown))
+	m, _ = send(m, key("space"))
+	_, cmd := send(m, key("enter"))
+
+	if got := submitted(t, cmd)["force"]; got != "true" {
+		t.Errorf("force %q, want the wheel to have moved focus from tag to force", got)
 	}
 }

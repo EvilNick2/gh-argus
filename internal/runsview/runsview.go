@@ -10,6 +10,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/EvilNick2/gh-argus/internal/mouse"
 	"github.com/EvilNick2/gh-argus/internal/runs"
 	"github.com/EvilNick2/gh-argus/internal/theme"
 	"github.com/EvilNick2/gh-argus/internal/timefmt"
@@ -222,15 +223,25 @@ func newTag() string {
 	return theme.Gold().Render("new")
 }
 
-func (m Model) View() string {
+// nameWidth is the width of repo names in the repos pane.
+func (m Model) nameWidth() int {
 	nameW := 8
 	for _, r := range m.repos {
 		nameW = max(nameW, ansi.StringWidth(shortName(r)))
 	}
-	nameW = min(nameW, 24)
-	// " " icon " " name "  new "
-	sideInner := nameW + 8
-	sideW := sideInner + 2
+	return min(nameW, 24)
+}
+
+// sideWidth is the repos pane's width including its border. A row is
+// " " icon " " name "  new ".
+func (m Model) sideWidth() int {
+	return m.nameWidth() + 10
+}
+
+func (m Model) View() string {
+	nameW := m.nameWidth()
+	sideW := m.sideWidth()
+	sideInner := sideW - 2
 	runsW := max(20, m.width-sideW)
 	runsInner := runsW - 2
 
@@ -299,4 +310,43 @@ func (m Model) View() string {
 		out[i] = left[i] + right[i]
 	}
 	return strings.Join(out, "\n")
+}
+
+// Mouse handles a click, double click or wheel at a point in the view. A
+// click selects the repo or run under it, a double click opens the run, and
+// the wheel moves the selection in the pane under the pointer.
+func (m Model) Mouse(ev mouse.Event) (Model, tea.Cmd) {
+	inSide := ev.X < m.sideWidth()
+	if d := ev.Wheel(); d != 0 {
+		focus := m.focusRuns
+		m.focusRuns = !inSide
+		m.move(d)
+		m.focusRuns = focus
+		return m, nil
+	}
+	// Rows sit inside the panes' borders.
+	if !ev.Clicked() || ev.Y < 1 || ev.Y >= m.height-1 {
+		return m, nil
+	}
+	if inSide {
+		if i := ev.Y - 1; i < len(m.repos) {
+			m.focusRuns = false
+			m.move(i - m.repoIdx)
+		}
+		return m, nil
+	}
+	// Below the runs pane's status line, each run takes two rows.
+	row := ev.Y - 2
+	st := m.current()
+	i := m.runOffset + row/2
+	if row < 0 || i >= min(len(st.runs), m.runOffset+m.rows()) {
+		return m, nil
+	}
+	m.focusRuns, m.runIdx = true, i
+	m.clamp()
+	if ev.Kind == mouse.DoubleClick {
+		open := OpenRunMsg{Repo: m.repos[m.repoIdx], Run: st.runs[i]}
+		return m, func() tea.Msg { return open }
+	}
+	return m, nil
 }

@@ -10,6 +10,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/EvilNick2/gh-argus/internal/mouse"
 	"github.com/EvilNick2/gh-argus/internal/runs"
 )
 
@@ -192,5 +193,31 @@ func TestMetricsIsOnePaneOfFullSize(t *testing.T) {
 		if w := ansi.StringWidth(l); w != 110 {
 			t.Errorf("line %d is %d wide, want 110: %q", i, w, l)
 		}
+	}
+}
+
+func TestClickSelectsMetricsRow(t *testing.T) {
+	// Column header at y 1, dotfiles total at y 2, its workflows from y 3.
+	m, _ := newModel().Mouse(mouse.Event{X: 10, Y: 4, Kind: mouse.Click})
+
+	if v := view(m); !strings.Contains(v, "Build and publish: last run 2h ago") {
+		t.Errorf("detail line does not follow the click:\n%s", v)
+	}
+}
+
+func TestWheelMovesMetricsSelection(t *testing.T) {
+	m, _ := newModel().Mouse(mouse.Event{X: 10, Y: 4, Kind: mouse.WheelDown})
+
+	if v := view(m); !strings.Contains(v, "Manifest check: last run 1h ago") {
+		t.Errorf("detail line after wheel down:\n%s", v)
+	}
+}
+
+func TestClickOnStatusRowSelectsNothing(t *testing.T) {
+	// o/empty's "no completed runs" row is y 5.
+	m, _ := newModel().Mouse(mouse.Event{X: 10, Y: 5, Kind: mouse.Click})
+
+	if v := view(m); !strings.Contains(v, "EvilNick2/dotfiles: last run") {
+		t.Errorf("selection moved:\n%s", v)
 	}
 }

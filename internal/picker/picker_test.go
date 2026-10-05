@@ -9,6 +9,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/EvilNick2/gh-argus/internal/mouse"
 	"github.com/EvilNick2/gh-argus/internal/repos"
 )
 
@@ -379,5 +380,72 @@ func TestPickerFillsScreenWithBars(t *testing.T) {
 	}
 	if !strings.Contains(lines[0], "argus") || !strings.Contains(lines[19], "enter watch") {
 		t.Errorf("header %q, status %q", lines[0], lines[19])
+	}
+}
+
+// The picker draws the whole screen: header bar at y 0, the pane's border
+// at y 1 and info line at y 2, then repo rows from y 3. The [ ] box is at
+// x 2 to 4.
+
+func mouseAt(x, y int, k mouse.Kind) mouse.Event { return mouse.Event{X: x, Y: y, Kind: k} }
+
+func TestClickMovesCursorOnly(t *testing.T) {
+	m, _ := newModel(t, sample, nil, 20)
+
+	m, _ = m.Mouse(mouseAt(20, 5, mouse.Click))
+	m = send(m, key("enter"))
+	if got := m.Selected(); !slices.Equal(got, []string{"EvilNick2/fonp"}) {
+		t.Errorf("Selected() = %v, want the clicked repo taken by enter", got)
+	}
+}
+
+func TestClickOnBoxToggles(t *testing.T) {
+	m, _ := newModel(t, sample, nil, 20)
+
+	m, _ = m.Mouse(mouseAt(3, 4, mouse.Click))
+	m, _ = m.Mouse(mouseAt(3, 6, mouse.Click))
+	m, _ = m.Mouse(mouseAt(3, 6, mouse.Click))
+	if got := m.Selected(); !slices.Equal(got, []string{"Bath-Impact-Lab/aXR-www"}) {
+		t.Errorf("Selected() = %v", got)
+	}
+}
+
+func TestDoubleClickRowToggles(t *testing.T) {
+	m, _ := newModel(t, sample, nil, 20)
+
+	m, _ = m.Mouse(mouseAt(25, 3, mouse.DoubleClick))
+	if got := m.Selected(); !slices.Equal(got, []string{"EvilNick2/dotfiles"}) {
+		t.Errorf("Selected() = %v", got)
+	}
+}
+
+func TestClickOutsideRowsDoesNothing(t *testing.T) {
+	m, _ := newModel(t, sample, nil, 20)
+
+	for _, y := range []int{0, 1, 2, 9, 19} {
+		m, _ = m.Mouse(mouseAt(3, y, mouse.DoubleClick))
+	}
+	if got := m.Selected(); len(got) != 0 {
+		t.Errorf("Selected() = %v, want nothing", got)
+	}
+}
+
+func TestWheelScrollsAndRequestsNewRows(t *testing.T) {
+	m, req := newModel(t, many(60), nil, 10)
+	before := len(req.all())
+
+	for range 30 {
+		m, _ = m.Mouse(mouseAt(20, 5, mouse.WheelDown))
+	}
+	if len(req.all()) <= before {
+		t.Error("scrolling with the wheel requested no new statuses")
+	}
+}
+
+func TestPickerEnablesMouse(t *testing.T) {
+	m, _ := newModel(t, sample, nil, 20)
+
+	if mode := m.View().MouseMode; mode != tea.MouseModeCellMotion {
+		t.Errorf("MouseMode = %v", mode)
 	}
 }
