@@ -55,6 +55,9 @@ shift to select text for copying.
 
 The terminal bell rings when a watched run finishes.
 
+Argus picks a dark or light palette from your terminal's background. If your
+terminal does not report it, set `ARGUS_THEME=light` or `ARGUS_THEME=dark`.
+
 Anything that changes a repo asks y/n first. The one exception is submitting
 the branch and inputs form, since submitting it is the confirmation.
 
@@ -95,7 +98,11 @@ ARGUS_LIVE=1 go test -v -run Live ./...
 The live tests call the real API with your token and change nothing.
 
 Releases are built by `cli/gh-extension-precompile` when a `v*` tag is pushed.
-Tags containing a hyphen, such as `v0.1.0-rc.1`, publish as prereleases.
+Tags containing a hyphen, such as `v0.1.0-rc.1`, publish as prereleases, and
+install with `gh extension install EvilNick2/gh-argus --pin <tag>`. That only
+works once a full release exists, since `gh extension install` first checks
+the latest release, which is never a prerelease, to decide whether the
+extension is a binary.
 
 ## Licence
 
