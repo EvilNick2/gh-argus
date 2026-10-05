@@ -20,6 +20,7 @@ func TestDoPostsToEndpoint(t *testing.T) {
 		{RerunFailed, "/repos/o/r/actions/runs/16/rerun-failed-jobs", http.StatusCreated},
 		{RerunAll, "/repos/o/r/actions/runs/16/rerun", http.StatusCreated},
 		{Cancel, "/repos/o/r/actions/runs/16/cancel", http.StatusAccepted},
+		{ForceCancel, "/repos/o/r/actions/runs/16/force-cancel", http.StatusAccepted},
 	}
 	for _, c := range cases {
 		var gotMethod, gotPath string
@@ -70,6 +71,8 @@ func TestAllowed(t *testing.T) {
 		{Cancel, running, true},
 		{Cancel, queued, true},
 		{Cancel, passed, false},
+		{ForceCancel, running, true},
+		{ForceCancel, passed, false},
 		{RerunAll, passed, true},
 		{RerunAll, failed, true},
 		{RerunAll, running, false},

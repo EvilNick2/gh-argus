@@ -20,23 +20,25 @@ const (
 	RerunFailed Kind = iota
 	RerunAll
 	Cancel
+	ForceCancel
 )
 
 func (k Kind) String() string {
-	return [...]string{"rerun failed jobs", "rerun all jobs", "cancel"}[k]
+	return [...]string{"rerun failed jobs", "rerun all jobs", "cancel", "force cancel"}[k]
 }
 
 func (k Kind) endpoint() string {
-	return [...]string{"rerun-failed-jobs", "rerun", "cancel"}[k]
+	return [...]string{"rerun-failed-jobs", "rerun", "cancel", "force-cancel"}[k]
 }
 
-// Allowed reports whether k makes sense for r: cancel while it is unfinished,
+// Allowed reports whether k makes sense for r: cancel and force cancel while
+// it is unfinished,
 // rerun all once it has completed, rerun failed once it has completed
 // without succeeding.
 func (k Kind) Allowed(r runs.Run) bool {
 	done := r.Status == "completed"
 	switch k {
-	case Cancel:
+	case Cancel, ForceCancel:
 		return !done
 	case RerunAll:
 		return done
