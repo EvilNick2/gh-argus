@@ -41,6 +41,8 @@ type fakeWatch struct {
 
 	logCalls []string
 	logBody  []joblog.Line
+	// logErrs are returned by successive log fetches, before logBody.
+	logErrs []error
 
 	acts   []string
 	actErr error
@@ -98,6 +100,11 @@ func (f *fakeWatch) deps() Deps {
 		},
 		FetchLog: func(ctx context.Context, repo string, id int64) ([]joblog.Line, error) {
 			f.logCalls = append(f.logCalls, fmt.Sprintf("%s/%d", repo, id))
+			if len(f.logErrs) > 0 {
+				err := f.logErrs[0]
+				f.logErrs = f.logErrs[1:]
+				return nil, err
+			}
 			return f.logBody, nil
 		},
 		Act: func(ctx context.Context, repo string, id int64, k actions.Kind) error {
@@ -1721,5 +1728,72 @@ func TestPartialDeleteReportsFailuresAndRemovesTheRest(t *testing.T) {
 	}
 	if strings.Contains(v, "#16 ") || !strings.Contains(v, "#15") {
 		t.Errorf("want #16 removed and #15 kept:\n%s", v)
+	}
+}
+
+func TestRunningJobLogWaitsForTheJobToFinish(t *testing.T) {
+	f := &fakeWatch{logBody: []joblog.Line{{Text: "hello from the runner"}}}
+	m, wait := onRunScreen(t, f)
+	running := logJob
+	running.Status, running.Conclusion = "in_progress", ""
+
+	m, cmd := step(m, runview.OpenLogMsg{Repo: "o/r", Job: running})
+	m = runOnce(m, cmd)
+	if len(f.logCalls) != 0 {
+		t.Errorf("fetched the log of a running job: %v", f.logCalls)
+	}
+	if v := view(m); !strings.Contains(v, "log appears when the job finishes") {
+		t.Errorf("log screen:\n%s", v)
+	}
+
+	f.runChans[0] <- watch.RunEvent{Jobs: []runs.Job{logJob}}
+	m, cmd = step(m, wait())
+	// A second poll with the job unchanged lets the batched wait return, and
+	// must not fetch again.
+	f.runChans[0] <- watch.RunEvent{Jobs: []runs.Job{logJob}}
+	m = runOnce(m, cmd)
+	if len(f.logCalls) != 1 {
+		t.Errorf("log fetched %d times after the job finished, want 1", len(f.logCalls))
+	}
+	if v := view(m); !strings.Contains(v, "hello from the runner") || !strings.Contains(v, "x failed") {
+		t.Errorf("log screen after the job finished:\n%s", v)
+	}
+}
+
+func TestLogNotUploadedYetIsRetried(t *testing.T) {
+	notFound := &joblog.StatusError{StatusCode: 404}
+	f := &fakeWatch{logBody: []joblog.Line{{Text: "hello from the runner"}}, logErrs: []error{notFound}}
+	m, fetch := onLogScreen(t, f)
+
+	m, retry := step(m, fetch())
+	if v := view(m); !strings.Contains(v, "waiting for the log to upload") {
+		t.Errorf("log screen after a 404:\n%s", v)
+	}
+	if retry == nil {
+		t.Fatal("no retry after a 404")
+	}
+	m, refetch := step(m, logRetryMsg{gen: m.logGen})
+	m, _ = step(m, refetch())
+	if v := view(m); len(f.logCalls) != 2 || !strings.Contains(v, "hello from the runner") {
+		t.Errorf("fetches %v, log screen:\n%s", f.logCalls, v)
+	}
+}
+
+func TestLogRetriesGiveUp(t *testing.T) {
+	notFound := &joblog.StatusError{StatusCode: 404}
+	f := &fakeWatch{logErrs: []error{notFound, notFound, notFound, notFound, notFound, notFound, notFound}}
+	m, fetch := onLogScreen(t, f)
+
+	m, retry := step(m, fetch())
+	for retry != nil && len(f.logCalls) < 10 {
+		var refetch tea.Cmd
+		m, refetch = step(m, logRetryMsg{gen: m.logGen})
+		m, retry = step(m, refetch())
+	}
+	if len(f.logCalls) > 6 {
+		t.Errorf("fetched %d times, want at most 6", len(f.logCalls))
+	}
+	if v := view(m); !strings.Contains(v, "404 Not Found") {
+		t.Errorf("log screen after giving up:\n%s", v)
 	}
 }

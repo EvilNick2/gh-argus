@@ -219,6 +219,7 @@ type Model struct {
 	logGen       int
 	logJob       runs.Job
 	logRep       string
+	logRetries   int
 
 	confirm  *pending
 	help     bool
@@ -387,6 +388,17 @@ func (m Model) cycleAttempt() (tea.Model, tea.Cmd) {
 	return m, tea.Batch(m.waitRun(), fetchAttempt)
 }
 
+// logRetryMsg asks for the log again after GitHub answered 404, tagged with
+// the fetch it retries.
+type logRetryMsg struct{ gen int }
+
+// GitHub writes a job's log only once the job finishes, and it can take a
+// few seconds after that to appear, so a 404 then is retried.
+const (
+	logRetries    = 5
+	logRetryAfter = 3 * time.Second
+)
+
 func (m *Model) openLog(repo string, job runs.Job) tea.Cmd {
 	m.logRep, m.logJob = repo, job
 	m.log = logview.New(repo, job).SetSize(m.width, m.runHeight())
@@ -394,13 +406,45 @@ func (m *Model) openLog(repo string, job runs.Job) tea.Cmd {
 	return m.fetchLog()
 }
 
+// fetchLog fetches the open job's log, or waits when the job is unfinished
+// and has no log yet.
 func (m *Model) fetchLog() tea.Cmd {
+	m.logRetries = 0
+	if m.logJob.Status != "completed" {
+		m.logGen++
+		m.log = m.log.Waiting("log appears when the job finishes")
+		return nil
+	}
+	return m.refetchLog()
+}
+
+func (m *Model) refetchLog() tea.Cmd {
 	m.logGen++
 	gen, repo, id, fetch := m.logGen, m.logRep, m.logJob.ID, m.deps.FetchLog
 	return func() tea.Msg {
 		lines, err := fetch(context.Background(), repo, id)
 		return logMsg{gen: gen, lines: lines, err: err}
 	}
+}
+
+// followLogJob keeps the open log's job up to date from the run screen's
+// job watch, and fetches the log once the job finishes.
+func (m *Model) followLogJob(jobs []runs.Job) tea.Cmd {
+	if m.screen != screenLog {
+		return nil
+	}
+	for _, j := range jobs {
+		if j.ID != m.logJob.ID {
+			continue
+		}
+		finished := m.logJob.Status != "completed" && j.Status == "completed"
+		m.logJob = j
+		m.log = m.log.SetJob(j)
+		if finished {
+			return m.fetchLog()
+		}
+	}
+	return nil
 }
 
 func (m *Model) stopRun() {
@@ -509,7 +553,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.run, _ = m.run.Update(msg.ev)
-		return m, m.waitRun()
+		return m, tea.Batch(m.followLogJob(msg.ev.Jobs), m.waitRun())
 
 	case picker.ConfirmMsg:
 		m.err = m.deps.SaveSelection(msg.Repos)
@@ -532,8 +576,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.gen != m.logGen {
 			return m, nil
 		}
+		var se *joblog.StatusError
+		if errors.As(msg.err, &se) && se.StatusCode == 404 && m.logRetries < logRetries {
+			m.logRetries++
+			m.log = m.log.Waiting("waiting for the log to upload")
+			gen := m.logGen
+			return m, tea.Tick(logRetryAfter, func(time.Time) tea.Msg { return logRetryMsg{gen} })
+		}
 		m.log, _ = m.log.Update(logview.LogMsg{Lines: msg.lines, Err: msg.err})
 		return m, nil
+
+	case logRetryMsg:
+		if msg.gen != m.logGen || m.screen != screenLog {
+			return m, nil
+		}
+		return m, m.refetchLog()
 
 	case logview.ReloadMsg:
 		return m, m.fetchLog()

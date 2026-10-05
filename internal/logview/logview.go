@@ -42,6 +42,8 @@ type Model struct {
 	lines  []joblog.Line
 	loaded bool
 	err    error
+	// waiting replaces "loading log" while there is no log to fetch yet.
+	waiting string
 
 	rows     []row
 	firstRow []int // first row index of each line
@@ -65,6 +67,18 @@ func (m Model) SetSize(w, h int) Model {
 	m.width, m.height = w, h
 	m.layout()
 	m.showLine(line, 0)
+	return m
+}
+
+// SetJob updates the job shown in the status line as it progresses.
+func (m Model) SetJob(job runs.Job) Model {
+	m.job = job
+	return m
+}
+
+// Waiting shows why there is no log yet, until the next LogMsg.
+func (m Model) Waiting(why string) Model {
+	m.waiting, m.err = why, nil
 	return m
 }
 
@@ -115,7 +129,7 @@ func (m *Model) showLine(line, above int) {
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case LogMsg:
-		m.err = msg.Err
+		m.err, m.waiting = msg.Err, ""
 		if msg.Err != nil {
 			return m, nil
 		}
@@ -304,6 +318,8 @@ func (m Model) View() string {
 	switch {
 	case m.err != nil:
 		status += theme.Fail().Render(m.err.Error())
+	case !m.loaded && m.waiting != "":
+		status += theme.Muted().Render(m.waiting)
 	case !m.loaded:
 		status += theme.Muted().Render("loading log")
 	default:
