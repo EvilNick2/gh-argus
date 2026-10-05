@@ -10,7 +10,6 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/EvilNick2/gh-argus/internal/actions"
@@ -1071,11 +1070,50 @@ func TestPromptShowsInStatusBar(t *testing.T) {
 func TestLightBackgroundSwitchesPalette(t *testing.T) {
 	f := &fakeWatch{}
 	m := sized(New(f.deps(), newPicker(), []string{"o/a"}))
+	light := lightPalette()
 	defer theme.SetDark(true)
 
 	step(m, tea.BackgroundColorMsg{Color: color.White})
-	if theme.Current().Text == theme.Current().Bar || theme.Current().Plume != lipgloss.Color("#12798A") {
+	if theme.Current() != light {
 		t.Errorf("palette not switched to light: %+v", theme.Current())
+	}
+}
+
+// lightPalette returns the light variant, leaving the dark one in use.
+func lightPalette() theme.Palette {
+	theme.SetDark(false)
+	defer theme.SetDark(true)
+	return theme.Current()
+}
+
+func TestThemeOverrideIgnoresTerminalBackground(t *testing.T) {
+	f := &fakeWatch{}
+	d := f.deps()
+	d.Theme = "light"
+	light := lightPalette()
+	defer theme.SetDark(true)
+
+	m := sized(New(d, newPicker(), []string{"o/a"}))
+	if theme.Current() != light {
+		t.Fatal("ARGUS_THEME=light did not pick the light palette")
+	}
+	step(m, tea.BackgroundColorMsg{Color: color.Black})
+	if theme.Current() != light {
+		t.Error("terminal background overrode ARGUS_THEME")
+	}
+}
+
+func TestThemeOverrideDark(t *testing.T) {
+	f := &fakeWatch{}
+	d := f.deps()
+	d.Theme = "dark"
+	light := lightPalette()
+	defer theme.SetDark(true)
+
+	m := sized(New(d, newPicker(), []string{"o/a"}))
+	step(m, tea.BackgroundColorMsg{Color: color.White})
+	if theme.Current() == light {
+		t.Error("terminal background overrode ARGUS_THEME=dark")
 	}
 }
 

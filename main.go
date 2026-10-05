@@ -56,6 +56,11 @@ func run() error {
 		return nil
 	}
 
+	theme := os.Getenv("ARGUS_THEME")
+	if theme != "" && theme != "light" && theme != "dark" {
+		return fmt.Errorf("ARGUS_THEME is %q, want light or dark", theme)
+	}
+
 	st, err := store.Open()
 	if err != nil {
 		return err
@@ -209,6 +214,7 @@ func run() error {
 		},
 		Now:     time.Now,
 		Version: version.String(),
+		Theme:   theme,
 	}
 
 	stopFlush := make(chan struct{})

@@ -78,6 +78,9 @@ type Deps struct {
 	Now         func() time.Time
 	// Version names the build, for the header.
 	Version string
+	// Theme is "light" or "dark" to fix the palette, or empty to follow the
+	// terminal's background.
+	Theme string
 }
 
 type screen int
@@ -238,6 +241,9 @@ type Model struct {
 // are given.
 func New(d Deps, p picker.Model, repos []string) Model {
 	m := Model{deps: d, picker: p}
+	if d.Theme != "" {
+		theme.SetDark(d.Theme == "dark")
+	}
 	if len(repos) > 0 {
 		m.start(repos)
 	}
@@ -514,7 +520,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.mouseMsg(msg)
 
 	case tea.BackgroundColorMsg:
-		theme.SetDark(msg.IsDark())
+		if m.deps.Theme == "" {
+			theme.SetDark(msg.IsDark())
+		}
 		return m, nil
 
 	case tea.WindowSizeMsg:
