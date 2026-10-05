@@ -25,6 +25,9 @@ var helpLeft = []helpSection{
 	{"Runs", [][2]string{
 		{"tab", "switch between repos and runs"},
 		{"enter", "open the run"},
+		{"/", "filter runs, esc clears"},
+		{"space", "mark a run"},
+		{"d", "delete marked runs, or this run"},
 		{"r", "rerun failed jobs"},
 		{"R", "rerun all jobs"},
 		{"c", "cancel the run"},
@@ -32,6 +35,7 @@ var helpLeft = []helpSection{
 	}},
 	{"Run", [][2]string{
 		{"enter", "open the job's log"},
+		{"a", "step back through attempts"},
 		{"esc", "back to runs"},
 	}},
 }

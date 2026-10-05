@@ -37,8 +37,11 @@ import (
 type Deps struct {
 	// Watch starts watching repos until ctx is done and returns the events.
 	Watch func(ctx context.Context, repos []string) <-chan watch.Event
-	// WatchRun polls the jobs of one run until ctx is done.
-	WatchRun func(ctx context.Context, repo string, id int64) <-chan watch.RunEvent
+	// WatchRun polls the jobs of one attempt of a run, 0 for the latest,
+	// until ctx is done.
+	WatchRun func(ctx context.Context, repo string, id int64, attempt int) <-chan watch.RunEvent
+	// RunAttempt fetches a run as it was at attempt n.
+	RunAttempt func(ctx context.Context, repo string, id int64, n int) (runs.Run, error)
 	// FetchLog downloads and parses the log of a job.
 	FetchLog func(ctx context.Context, repo string, id int64) ([]joblog.Line, error)
 	// Act sends a run action such as a rerun or cancel.
@@ -59,6 +62,8 @@ type Deps struct {
 	ListRunners func(ctx context.Context, repo string) ([]runners.Runner, error)
 	// ListCaches fetches a repo's Actions caches.
 	ListCaches func(ctx context.Context, repo string) ([]caches.Cache, error)
+	// DeleteRun deletes one run.
+	DeleteRun func(ctx context.Context, repo string, id int64) error
 	// DeleteCache deletes one cache.
 	DeleteCache func(ctx context.Context, repo string, id int64) error
 	// Environments lists a repo's deployment environments for the dispatch
@@ -91,6 +96,13 @@ type eventMsg struct {
 	gen int
 	ev  watch.Event
 	ok  bool
+}
+
+// attemptMsg carries the open run as it was at an earlier attempt.
+type attemptMsg struct {
+	gen int
+	run runs.Run
+	err error
 }
 
 // runEventMsg carries one job event for the run screen, tagged like eventMsg.
@@ -153,7 +165,7 @@ type pending struct {
 	success string // shown when it succeeds
 	failure string // shown as "<failure> failed: <err>"
 	do      func(context.Context) error
-	after   tea.Cmd // runs once it succeeds, such as reloading the list
+	after   tea.Cmd // runs once it is done, such as reloading the list
 }
 
 // actionDoneMsg reports the result of a pending change.
@@ -186,6 +198,9 @@ type Model struct {
 	cancel context.CancelFunc
 
 	run       runview.Model
+	runRepo   string
+	runLatest runs.Run // the open run at its latest attempt
+	attempt   int      // attempt shown, 0 for the latest
 	runGen    int
 	runEvents <-chan watch.RunEvent
 	runCancel context.CancelFunc
@@ -326,13 +341,50 @@ func (m *Model) stop() {
 }
 
 func (m *Model) openRun(repo string, r runs.Run) {
+	m.runRepo, m.runLatest, m.attempt = repo, r, 0
+	m.watchAttempt(0)
+	m.run = runview.New(repo, r, m.deps.Now).SetAttempt(0, r.RunAttempt).SetSize(m.width, m.runHeight())
+	m.screen = screenRun
+}
+
+// watchAttempt polls the jobs of an attempt of the open run, 0 the latest.
+func (m *Model) watchAttempt(attempt int) {
 	m.stopRun()
 	ctx, cancel := context.WithCancel(context.Background())
 	m.runGen++
 	m.runCancel = cancel
-	m.runEvents = m.deps.WatchRun(ctx, repo, r.ID)
-	m.run = runview.New(repo, r, m.deps.Now).SetSize(m.width, m.runHeight())
-	m.screen = screenRun
+	m.runEvents = m.deps.WatchRun(ctx, m.runRepo, m.runLatest.ID, attempt)
+}
+
+// cycleAttempt shows the open run's previous attempt, wrapping from the
+// first back to the latest.
+func (m Model) cycleAttempt() (tea.Model, tea.Cmd) {
+	latest := m.runLatest
+	if latest.RunAttempt <= 1 {
+		m.flash = fmt.Sprintf("#%d has only one attempt", latest.RunNumber)
+		return m, nil
+	}
+	cur := m.attempt
+	if cur == 0 {
+		cur = latest.RunAttempt
+	}
+	next := cur - 1
+	if next < 1 {
+		next = 0
+	}
+	m.attempt = next
+	m.watchAttempt(next)
+	m.run = m.run.SetAttempt(next, latest.RunAttempt)
+	if next == 0 {
+		m.run = m.run.SetRun(latest)
+		return m, m.waitRun()
+	}
+	gen, get, repo, id := m.runGen, m.deps.RunAttempt, m.runRepo, latest.ID
+	fetchAttempt := func() tea.Msg {
+		r, err := get(context.Background(), repo, id, next)
+		return attemptMsg{gen: gen, run: r, err: err}
+	}
+	return m, tea.Batch(m.waitRun(), fetchAttempt)
 }
 
 func (m *Model) openLog(repo string, job runs.Job) tea.Cmd {
@@ -427,16 +479,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.runs, _ = m.runs.Update(msg.ev)
-		if m.screen == screenRun || m.screen == screenLog {
-			if repo, open := m.run.Run(); repo == msg.ev.Repo {
-				for _, r := range msg.ev.Runs {
-					if r.ID == open.ID {
-						m.run = m.run.SetRun(r)
+		// Keep the open run current, but leave an earlier attempt's header
+		// showing that attempt.
+		if (m.screen == screenRun || m.screen == screenLog) && m.runRepo == msg.ev.Repo {
+			for _, r := range msg.ev.Runs {
+				if r.ID == m.runLatest.ID {
+					m.runLatest = r
+					if m.attempt == 0 {
+						m.run = m.run.SetRun(r).SetAttemptCount(r.RunAttempt)
 					}
 				}
 			}
 		}
 		return m, m.wait()
+
+	case attemptMsg:
+		if msg.gen != m.runGen {
+			return m, nil
+		}
+		if msg.err != nil {
+			m.flash, m.flashErr = "loading attempt failed: "+msg.err.Error(), true
+			return m, nil
+		}
+		m.run = m.run.SetRun(msg.run)
+		return m, nil
 
 	case runEventMsg:
 		if msg.gen != m.runGen || !msg.ok {
@@ -482,7 +548,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.flash = msg.success
 		}
-		if msg.err == nil && msg.after != nil {
+		// After runs whatever happened, so a partial failure still shows
+		// what did change.
+		if msg.after != nil {
 			return m, msg.after
 		}
 		return m, nil
@@ -527,6 +595,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case runsRemovedMsg:
+		m.runs = m.runs.Remove(msg.repo, msg.ids).ClearMarks()
+		return m, nil
+
 	case wfLoadedMsg:
 		if msg.gen == m.gen {
 			m.wfs, _ = m.wfs.Update(msg.LoadedMsg)
@@ -540,6 +612,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.flash, m.flashErr = "", false
 		if m.confirm != nil {
 			return m.answer(msg)
+		}
+		if m.screen == screenTabs && m.tab == 0 && m.runs.Filtering() {
+			var cmd tea.Cmd
+			m.runs, cmd = m.runs.Update(msg)
+			return m, cmd
 		}
 		if m.help {
 			switch msg.String() {
@@ -565,6 +642,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if kind, ok := actionKeys[msg.String()]; ok && (m.screen == screenRun || m.screen == screenTabs && m.tab == 0) {
 			return m.ask(kind), nil
 		}
+		if msg.String() == "d" && m.screen == screenTabs && m.tab == 0 {
+			return m.askDeleteRuns(), nil
+		}
 		if msg.String() == "d" && m.screen == screenTabs && m.tab == 3 {
 			return m.askDeleteCache(), nil
 		}
@@ -578,8 +658,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case screenPicker:
 			return m.updatePicker(msg)
 		case screenRun:
-			if msg.String() == "q" {
+			switch msg.String() {
+			case "q":
 				return m, m.quit()
+			case "a":
+				return m.cycleAttempt()
 			}
 			var cmd tea.Cmd
 			m.run, cmd = m.run.Update(msg)
@@ -662,6 +745,78 @@ func (m Model) askWorkflow(enable bool) Model {
 			do:      func(ctx context.Context) error { return set(ctx, repo, wf.ID, enable) },
 			after:   m.loadWorkflows(repo),
 		}
+	}
+	return m
+}
+
+// runsRemovedMsg reports runs deleted from repo.
+type runsRemovedMsg struct {
+	repo string
+	ids  []int64
+}
+
+// askDeleteRuns starts the y/n prompt to delete the marked runs, or the run
+// under the cursor when none are marked. Unfinished runs are skipped.
+func (m Model) askDeleteRuns() Model {
+	repo, targets := m.runs.Marked()
+	if len(targets) == 0 {
+		var r runs.Run
+		var ok bool
+		if repo, r, ok = m.runs.Current(); !ok {
+			return m
+		}
+		targets = []runs.Run{r}
+	}
+	var done []runs.Run
+	skipped := 0
+	for _, r := range targets {
+		if r.Status == "completed" {
+			done = append(done, r)
+		} else {
+			skipped++
+		}
+	}
+	switch {
+	case len(done) == 0 && len(targets) == 1:
+		m.flash = fmt.Sprintf("cannot delete #%d, it has not finished", targets[0].RunNumber)
+		return m
+	case len(done) == 0:
+		m.flash = "cannot delete, none of the marked runs has finished"
+		return m
+	}
+
+	prompt := fmt.Sprintf("delete %d runs from %s", len(done), repo)
+	success := fmt.Sprintf("deleted %d runs", len(done))
+	if len(done) == 1 {
+		prompt = fmt.Sprintf("delete #%d %s", done[0].RunNumber, done[0].Name)
+		success = fmt.Sprintf("deleted #%d", done[0].RunNumber)
+	}
+	if skipped > 0 {
+		prompt += fmt.Sprintf(", skipping %d unfinished", skipped)
+	}
+	del := m.deps.DeleteRun
+	var deleted []int64
+	m.confirm = &pending{
+		prompt:  prompt,
+		success: success,
+		failure: "delete runs",
+		do: func(ctx context.Context) error {
+			var failed []string
+			for _, r := range done {
+				if err := del(ctx, repo, r.ID); err != nil {
+					failed = append(failed, fmt.Sprintf("#%d: %v", r.RunNumber, err))
+					continue
+				}
+				deleted = append(deleted, r.ID)
+			}
+			if len(failed) > 0 {
+				return fmt.Errorf("deleted %d of %d runs, %s", len(deleted), len(done), strings.Join(failed, ", "))
+			}
+			return nil
+		},
+		// Reads deleted after do has filled it, since it runs once the
+		// result is in.
+		after: func() tea.Msg { return runsRemovedMsg{repo: repo, ids: deleted} },
 	}
 	return m
 }
@@ -876,7 +1031,7 @@ func (m Model) View() tea.View {
 	case screenPicker:
 		return m.picker.View()
 	case screenRun:
-		return m.frame(m.run.View(), false, m.runHeight(), "j/k job  enter log  r/R rerun  c cancel  esc back  ? keys  q quit")
+		return m.frame(m.run.View(), false, m.runHeight(), "enter log  a attempt  r/R rerun  c cancel  esc back  ? keys  q quit")
 	case screenForm:
 		return m.frame(m.form.View(), false, m.runHeight(), "tab next  left/right pick  space toggle  enter run  esc cancel")
 	case screenLog:
@@ -884,7 +1039,7 @@ func (m Model) View() tea.View {
 	}
 
 	body := m.runs.View()
-	help := "tab pane  enter open  r/R rerun  c cancel  p repos  ? keys  q quit"
+	help := "enter open  / filter  space mark  d delete  r/R rerun  c cancel  ? keys  q quit"
 	switch m.tab {
 	case 1:
 		body = m.wfs.View()

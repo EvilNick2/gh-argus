@@ -101,10 +101,18 @@ func run() error {
 			}()
 			return out
 		},
-		WatchRun: func(ctx context.Context, repo string, id int64) <-chan watch.RunEvent {
+		RunAttempt: func(ctx context.Context, repo string, id int64, n int) (runs.Run, error) {
+			res, err := w.Fetcher.Get(ctx, fmt.Sprintf("/repos/%s/actions/runs/%d/attempts/%d", repo, id, n))
+			if err != nil {
+				return runs.Run{}, err
+			}
+			var r runs.Run
+			return r, json.Unmarshal(res.Body, &r)
+		},
+		WatchRun: func(ctx context.Context, repo string, id int64, attempt int) <-chan watch.RunEvent {
 			ch := make(chan watch.RunEvent)
 			go func() {
-				w.WatchRun(ctx, repo, id, ch)
+				w.WatchRun(ctx, repo, id, attempt, ch)
 				close(ch)
 			}()
 			return ch
@@ -174,6 +182,9 @@ func run() error {
 				return nil, err
 			}
 			return caches.Decode(res.Body)
+		},
+		DeleteRun: func(ctx context.Context, repo string, id int64) error {
+			return actions.DeleteRun(ctx, client, apiURL, repo, id)
 		},
 		DeleteCache: func(ctx context.Context, repo string, id int64) error {
 			return actions.DeleteCache(ctx, client, apiURL, repo, id)

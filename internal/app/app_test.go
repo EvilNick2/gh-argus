@@ -63,6 +63,8 @@ type fakeWatch struct {
 	recentCalls []string
 	recent      map[string][]runs.Run
 
+	deletedRuns []string
+	deleteErr   map[int64]error
 	runnerCalls []string
 	runnerErr   map[string]error
 	cacheCalls  []string
@@ -83,9 +85,13 @@ func (f *fakeWatch) deps() Deps {
 			f.saved = append(f.saved, rs)
 			return nil
 		},
-		WatchRun: func(ctx context.Context, repo string, id int64) <-chan watch.RunEvent {
+		WatchRun: func(ctx context.Context, repo string, id int64, attempt int) <-chan watch.RunEvent {
 			ch := make(chan watch.RunEvent, 4)
-			f.runCalls = append(f.runCalls, fmt.Sprintf("%s/%d", repo, id))
+			call := fmt.Sprintf("%s/%d", repo, id)
+			if attempt > 0 {
+				call += fmt.Sprintf("#%d", attempt)
+			}
+			f.runCalls = append(f.runCalls, call)
 			f.runCtxs = append(f.runCtxs, ctx)
 			f.runChans = append(f.runChans, ch)
 			return ch
@@ -100,6 +106,9 @@ func (f *fakeWatch) deps() Deps {
 		},
 		Seed:      func(repo string) *watch.Seed { return f.seeds[repo] },
 		Remaining: func() int { return f.remaining },
+		RunAttempt: func(ctx context.Context, repo string, id int64, n int) (runs.Run, error) {
+			return runs.Run{ID: id, RunNumber: 7, Name: "build", Status: "completed", Conclusion: "failure", RunAttempt: n}, nil
+		},
 		ListWorkflows: func(ctx context.Context, repo string) ([]workflows.Workflow, error) {
 			f.wfCalls = append(f.wfCalls, repo)
 			return f.wfs[repo], nil
@@ -131,6 +140,13 @@ func (f *fakeWatch) deps() Deps {
 		ListCaches: func(ctx context.Context, repo string) ([]caches.Cache, error) {
 			f.cacheCalls = append(f.cacheCalls, repo)
 			return f.caches[repo], nil
+		},
+		DeleteRun: func(ctx context.Context, repo string, id int64) error {
+			if err := f.deleteErr[id]; err != nil {
+				return err
+			}
+			f.deletedRuns = append(f.deletedRuns, fmt.Sprintf("%s/%d", repo, id))
+			return nil
 		},
 		DeleteCache: func(ctx context.Context, repo string, id int64) error {
 			f.deleted = append(f.deleted, fmt.Sprintf("%s/%d", repo, id))
@@ -1135,7 +1151,7 @@ func TestStatusBarDropsLegendBeforeHints(t *testing.T) {
 	}
 	narrow, _ := step(m, tea.WindowSizeMsg{Width: 80, Height: 20})
 	lines = strings.Split(view(narrow), "\n")
-	if last := lines[len(lines)-1]; strings.Contains(last, "+ pass") || !strings.Contains(last, "tab pane") {
+	if last := lines[len(lines)-1]; strings.Contains(last, "+ pass") || !strings.Contains(last, "enter open") {
 		t.Errorf("narrow status bar %q, want hints without the legend", last)
 	}
 }
@@ -1511,5 +1527,199 @@ func TestSubmitOnBranchWithoutFileSaysSo(t *testing.T) {
 
 	if v := view(m); !strings.Contains(v, ".github/workflows/release.yml does not exist on dev") {
 		t.Errorf("view:\n%s", v)
+	}
+}
+
+func TestTypingARunsFilterTakesEveryKey(t *testing.T) {
+	f := &fakeWatch{}
+	m := onRunsTab(t, f)
+
+	m, _ = step(m, keyMsg("/"))
+	for _, k := range []string{"r", "c", "q", "p", "2", "?"} {
+		var cmd tea.Cmd
+		m, cmd = step(m, keyMsg(k))
+		if cmd != nil {
+			if _, ok := cmd().(tea.QuitMsg); ok {
+				t.Fatalf("%s quit while typing a filter", k)
+			}
+		}
+	}
+	v := view(m)
+	if !strings.Contains(v, "/rcqp2?") || strings.Contains(v, "y/n") || !strings.Contains(v, "[1] Runs") {
+		t.Errorf("keys acted while typing a filter:\n%s", v)
+	}
+}
+
+// runOnce runs cmd, and each command it batches, feeding the messages to m
+// without following the commands that come back. A watch's wait returns
+// another wait, which runAll would follow forever.
+func runOnce(m Model, cmd tea.Cmd) Model {
+	if cmd == nil {
+		return m
+	}
+	msg := cmd()
+	if batch, ok := msg.(tea.BatchMsg); ok {
+		for _, c := range batch {
+			m, _ = step(m, c())
+		}
+		return m
+	}
+	m, _ = step(m, msg)
+	return m
+}
+
+// feedJobs sends the newest job watch an empty job list, as the watcher's
+// first poll would, so commands waiting on it return.
+func feedJobs(f *fakeWatch) {
+	f.runChans[len(f.runChans)-1] <- watch.RunEvent{Jobs: []runs.Job{}}
+}
+
+func TestACyclesThroughAttempts(t *testing.T) {
+	f := &fakeWatch{}
+	m := sized(New(f.deps(), newPicker(), []string{"o/r"}))
+	rerun := openRun
+	rerun.RunAttempt = 2
+	m, _ = step(m, runsview.OpenRunMsg{Repo: "o/r", Run: rerun})
+
+	m, cmd := step(m, keyMsg("a"))
+	feedJobs(f)
+	m = runOnce(m, cmd)
+	if f.runCalls[len(f.runCalls)-1] != "o/r/7#1" {
+		t.Errorf("run watch calls %v, want attempt 1 watched", f.runCalls)
+	}
+	if l := strings.Split(view(m), "\n")[2]; !strings.Contains(l, "x failed") || !strings.Contains(l, "attempt 1 of 2") {
+		t.Errorf("state line %q, want attempt 1's own state", l)
+	}
+	if f.runCtxs[0].Err() == nil {
+		t.Error("latest attempt's job watch not stopped")
+	}
+
+	m, cmd = step(m, keyMsg("a"))
+	feedJobs(f)
+	m = runOnce(m, cmd)
+	if f.runCalls[len(f.runCalls)-1] != "o/r/7" {
+		t.Errorf("run watch calls %v, want back to the latest", f.runCalls)
+	}
+	if l := strings.Split(view(m), "\n")[2]; !strings.Contains(l, "* running") || !strings.Contains(l, "attempt 2 of 2") {
+		t.Errorf("state line %q, want the latest attempt again", l)
+	}
+}
+
+func TestAOnSingleAttemptRunExplains(t *testing.T) {
+	f := &fakeWatch{}
+	m, _ := onRunScreen(t, f)
+
+	m, _ = step(m, keyMsg("a"))
+	if v := view(m); !strings.Contains(v, "#7 has only one attempt") {
+		t.Errorf("view:\n%s", v)
+	}
+	if len(f.runCalls) != 1 {
+		t.Errorf("run watch calls %v", f.runCalls)
+	}
+}
+
+func TestRepoUpdatesLeaveAnEarlierAttemptsHeader(t *testing.T) {
+	f := &fakeWatch{}
+	m := sized(New(f.deps(), newPicker(), []string{"o/r"}))
+	rerun := openRun
+	rerun.RunAttempt = 2
+	m, _ = step(m, runsview.OpenRunMsg{Repo: "o/r", Run: rerun})
+	m, cmd := step(m, keyMsg("a"))
+	feedJobs(f)
+	m = runOnce(m, cmd)
+
+	done := rerun
+	done.Status, done.Conclusion = "completed", "success"
+	f.chans[0] <- watch.Event{Repo: "o/r", Runs: []runs.Run{done}, Changes: []runs.Change{{Prev: &rerun, Run: done}}}
+	m, _ = step(m, m.wait()())
+	if l := strings.Split(view(m), "\n")[2]; !strings.Contains(l, "x failed") {
+		t.Errorf("state line %q, want attempt 1's state kept", l)
+	}
+}
+
+var (
+	passedRun  = runs.Run{ID: 15, RunNumber: 15, Name: "Manifest check", Status: "completed", Conclusion: "success"}
+	runningRun = runs.Run{ID: 17, RunNumber: 17, Name: "Build", Status: "in_progress"}
+)
+
+// onRunsTabWith returns a model on the Runs tab of o/r showing rs, with the
+// runs pane focused.
+func onRunsTabWith(t *testing.T, f *fakeWatch, rs ...runs.Run) Model {
+	t.Helper()
+	m := sized(New(f.deps(), newPicker(), []string{"o/r"}))
+	f.chans[0] <- watch.Event{Repo: "o/r", Initial: true, Runs: rs}
+	m, _ = step(m, m.wait()())
+	m, _ = step(m, tea.KeyPressMsg{Code: tea.KeyTab})
+	return m
+}
+
+func spaceKey() tea.Msg { return tea.KeyPressMsg{Code: tea.KeySpace, Text: " "} }
+
+func TestDeleteRunUnderCursor(t *testing.T) {
+	f := &fakeWatch{}
+	m := onRunsTabWith(t, f, failedRun, passedRun)
+
+	m, _ = step(m, keyMsg("d"))
+	if v := view(m); !strings.Contains(v, "delete #16 Manifest check? y/n") {
+		t.Fatalf("no prompt:\n%s", v)
+	}
+	m, cmd := step(m, keyMsg("y"))
+	m = runAll(m, cmd)
+	if !slices.Equal(f.deletedRuns, []string{"o/r/16"}) {
+		t.Errorf("deleted %v", f.deletedRuns)
+	}
+	v := view(m)
+	if strings.Contains(v, "x #16") || !strings.Contains(v, "deleted #16") {
+		t.Errorf("run not removed or no confirmation:\n%s", v)
+	}
+}
+
+func TestDeleteMarkedRunsSkippingUnfinished(t *testing.T) {
+	f := &fakeWatch{}
+	m := onRunsTabWith(t, f, runningRun, failedRun, passedRun)
+
+	for _, k := range []tea.Msg{spaceKey(), keyMsg("j"), spaceKey(), keyMsg("j"), spaceKey()} {
+		m, _ = step(m, k)
+	}
+	m, _ = step(m, keyMsg("d"))
+	if v := view(m); !strings.Contains(v, "delete 2 runs from o/r, skipping 1 unfinished? y/n") {
+		t.Fatalf("no prompt:\n%s", v)
+	}
+	m, cmd := step(m, keyMsg("y"))
+	m = runAll(m, cmd)
+	if !slices.Equal(f.deletedRuns, []string{"o/r/16", "o/r/15"}) {
+		t.Errorf("deleted %v", f.deletedRuns)
+	}
+	if v := view(m); strings.Contains(v, "marked") || !strings.Contains(v, "deleted 2 runs") || !strings.Contains(v, "#17") {
+		t.Errorf("view:\n%s", v)
+	}
+}
+
+func TestDeleteOnlyUnfinishedExplains(t *testing.T) {
+	f := &fakeWatch{}
+	m := onRunsTabWith(t, f, runningRun)
+
+	m, _ = step(m, keyMsg("d"))
+	if v := view(m); strings.Contains(v, "y/n") || !strings.Contains(v, "cannot delete #17, it has not finished") {
+		t.Errorf("view:\n%s", v)
+	}
+}
+
+func TestPartialDeleteReportsFailuresAndRemovesTheRest(t *testing.T) {
+	f := &fakeWatch{deleteErr: map[int64]error{15: &actions.StatusError{StatusCode: 403, Message: "Must have admin rights"}}}
+	m := onRunsTabWith(t, f, failedRun, passedRun)
+
+	m, _ = step(m, spaceKey())
+	m, _ = step(m, keyMsg("j"))
+	m, _ = step(m, spaceKey())
+	m, _ = step(m, keyMsg("d"))
+	m, cmd := step(m, keyMsg("y"))
+	m = runAll(m, cmd)
+	v := view(m)
+	if !strings.Contains(v, "deleted 1 of 2 runs, #15: 403 Must have admin rights") {
+		t.Errorf("no partial failure message:\n%s", v)
+	}
+	if strings.Contains(v, "#16 ") || !strings.Contains(v, "#15") {
+		t.Errorf("want #16 removed and #15 kept:\n%s", v)
 	}
 }
