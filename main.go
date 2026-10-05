@@ -17,10 +17,12 @@ import (
 
 	"github.com/EvilNick2/gh-argus/internal/actions"
 	"github.com/EvilNick2/gh-argus/internal/app"
+	"github.com/EvilNick2/gh-argus/internal/caches"
 	"github.com/EvilNick2/gh-argus/internal/fetch"
 	"github.com/EvilNick2/gh-argus/internal/joblog"
 	"github.com/EvilNick2/gh-argus/internal/picker"
 	"github.com/EvilNick2/gh-argus/internal/repos"
+	"github.com/EvilNick2/gh-argus/internal/runners"
 	"github.com/EvilNick2/gh-argus/internal/runs"
 	"github.com/EvilNick2/gh-argus/internal/snapshot"
 	"github.com/EvilNick2/gh-argus/internal/store"
@@ -154,6 +156,23 @@ func run() error {
 				return nil, err
 			}
 			return runs.Decode(res.Body)
+		},
+		ListRunners: func(ctx context.Context, repo string) ([]runners.Runner, error) {
+			res, err := w.Fetcher.Get(ctx, "/repos/"+repo+"/actions/runners?per_page=100")
+			if err != nil {
+				return nil, err
+			}
+			return runners.Decode(res.Body)
+		},
+		ListCaches: func(ctx context.Context, repo string) ([]caches.Cache, error) {
+			res, err := w.Fetcher.Get(ctx, "/repos/"+repo+"/actions/caches?per_page=100")
+			if err != nil {
+				return nil, err
+			}
+			return caches.Decode(res.Body)
+		},
+		DeleteCache: func(ctx context.Context, repo string, id int64) error {
+			return actions.DeleteCache(ctx, client, apiURL, repo, id)
 		},
 		Branches: func(ctx context.Context, repo string) ([]string, error) {
 			res, err := w.Fetcher.Get(ctx, "/repos/"+repo+"/branches?per_page=100")

@@ -12,11 +12,15 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/EvilNick2/gh-argus/internal/actions"
+	"github.com/EvilNick2/gh-argus/internal/caches"
+	"github.com/EvilNick2/gh-argus/internal/cachesview"
 	"github.com/EvilNick2/gh-argus/internal/dispatchform"
 	"github.com/EvilNick2/gh-argus/internal/joblog"
 	"github.com/EvilNick2/gh-argus/internal/logview"
 	"github.com/EvilNick2/gh-argus/internal/metricsview"
 	"github.com/EvilNick2/gh-argus/internal/picker"
+	"github.com/EvilNick2/gh-argus/internal/runners"
+	"github.com/EvilNick2/gh-argus/internal/runnersview"
 	"github.com/EvilNick2/gh-argus/internal/runs"
 	"github.com/EvilNick2/gh-argus/internal/runsview"
 	"github.com/EvilNick2/gh-argus/internal/runview"
@@ -45,6 +49,12 @@ type Deps struct {
 	DispatchSpec func(ctx context.Context, repo string, wf workflows.Workflow) (string, workflows.DispatchSpec, error)
 	// RecentRuns fetches a repo's recent runs for the Metrics tab.
 	RecentRuns func(ctx context.Context, repo string) ([]runs.Run, error)
+	// ListRunners fetches a repo's self-hosted runners.
+	ListRunners func(ctx context.Context, repo string) ([]runners.Runner, error)
+	// ListCaches fetches a repo's Actions caches.
+	ListCaches func(ctx context.Context, repo string) ([]caches.Cache, error)
+	// DeleteCache deletes one cache.
+	DeleteCache func(ctx context.Context, repo string, id int64) error
 	// Branches lists a repo's branches for the dispatch form.
 	Branches func(ctx context.Context, repo string) ([]string, error)
 	// Dispatch triggers a workflow on ref with inputs.
@@ -64,16 +74,7 @@ const (
 	screenForm
 )
 
-var tabs = []struct {
-	name      string
-	milestone int
-}{
-	{"Runs", 3},
-	{"Workflows", 4},
-	{"Metrics", 5},
-	{"Cache", 6},
-	{"Runners", 6},
-}
+var tabs = []string{"Runs", "Workflows", "Metrics", "Cache", "Runners"}
 
 // eventMsg carries one watcher event. gen identifies the watch it came from,
 // so events from a watch that has since been replaced are dropped.
@@ -105,6 +106,18 @@ type wfLoadedMsg struct {
 	workflowsview.LoadedMsg
 }
 
+// rnLoadedMsg and caLoadedMsg carry one repo's runners or caches, tagged
+// like wfLoadedMsg.
+type rnLoadedMsg struct {
+	gen int
+	runnersview.LoadedMsg
+}
+
+type caLoadedMsg struct {
+	gen int
+	cachesview.LoadedMsg
+}
+
 // metLoadedMsg carries one repo's recent runs for the Metrics tab, tagged
 // like wfLoadedMsg.
 type metLoadedMsg struct {
@@ -130,7 +143,7 @@ type pending struct {
 	success string // shown when it succeeds
 	failure string // shown as "<failure> failed: <err>"
 	do      func(context.Context) error
-	refresh string // repo whose workflows to reload afterwards, if any
+	after   tea.Cmd // runs once it succeeds, such as reloading the list
 }
 
 // actionDoneMsg reports the result of a pending change.
@@ -152,6 +165,8 @@ type Model struct {
 	runs   runsview.Model
 	wfs    workflowsview.Model
 	mets   metricsview.Model
+	cchs   cachesview.Model
+	rnrs   runnersview.Model
 	repos  []string
 	tab    int
 
@@ -207,8 +222,36 @@ func (m *Model) start(repos []string) {
 	}
 	m.wfs = workflowsview.New(repos).SetSize(m.width, m.bodyHeight())
 	m.mets = metricsview.New(repos, m.deps.Now).SetSize(m.width, m.bodyHeight())
+	m.cchs = cachesview.New(repos, m.deps.Now).SetSize(m.width, m.bodyHeight())
+	m.rnrs = runnersview.New(repos).SetSize(m.width, m.bodyHeight())
 	m.repos = repos
 	m.screen, m.tab = screenTabs, 0
+}
+
+// loadRunners fetches each watched repo's self-hosted runners.
+func (m Model) loadRunners() tea.Cmd {
+	var cmds []tea.Cmd
+	for _, r := range m.repos {
+		gen, list := m.gen, m.deps.ListRunners
+		cmds = append(cmds, func() tea.Msg {
+			rs, err := list(context.Background(), r)
+			return rnLoadedMsg{gen: gen, LoadedMsg: runnersview.LoadedMsg{Repo: r, Runners: rs, Err: err}}
+		})
+	}
+	return tea.Batch(cmds...)
+}
+
+// loadCaches fetches the caches of repos.
+func (m Model) loadCaches(repos ...string) tea.Cmd {
+	var cmds []tea.Cmd
+	for _, r := range repos {
+		gen, list := m.gen, m.deps.ListCaches
+		cmds = append(cmds, func() tea.Msg {
+			cs, err := list(context.Background(), r)
+			return caLoadedMsg{gen: gen, LoadedMsg: cachesview.LoadedMsg{Repo: r, Caches: cs, Err: err}}
+		})
+	}
+	return tea.Batch(cmds...)
 }
 
 // loadMetrics fetches each watched repo's recent runs. The fetcher's ETags
@@ -329,6 +372,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.runs = m.runs.SetSize(m.width, m.bodyHeight())
 		m.wfs = m.wfs.SetSize(m.width, m.bodyHeight())
 		m.mets = m.mets.SetSize(m.width, m.bodyHeight())
+		m.cchs = m.cchs.SetSize(m.width, m.bodyHeight())
+		m.rnrs = m.rnrs.SetSize(m.width, m.bodyHeight())
 		m.run = m.run.SetSize(m.width, m.runHeight())
 		m.log = m.log.SetSize(m.width, m.runHeight())
 		m.form = m.form.SetSize(m.width, m.runHeight())
@@ -394,8 +439,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.flash = msg.success
 		}
-		if msg.refresh != "" {
-			return m, m.loadWorkflows(msg.refresh)
+		if msg.err == nil && msg.after != nil {
+			return m, msg.after
 		}
 		return m, nil
 
@@ -420,6 +465,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m.offerDispatch(msg), nil
 
+	case rnLoadedMsg:
+		if msg.gen == m.gen {
+			m.rnrs, _ = m.rnrs.Update(msg.LoadedMsg)
+		}
+		return m, nil
+
+	case caLoadedMsg:
+		if msg.gen == m.gen {
+			m.cchs, _ = m.cchs.Update(msg.LoadedMsg)
+		}
+		return m, nil
+
 	case metLoadedMsg:
 		if msg.gen == m.gen {
 			m.mets, _ = m.mets.Update(msg.LoadedMsg)
@@ -442,6 +499,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if kind, ok := actionKeys[msg.String()]; ok && (m.screen == screenRun || m.screen == screenTabs && m.tab == 0) {
 			return m.ask(kind), nil
+		}
+		if msg.String() == "d" && m.screen == screenTabs && m.tab == 3 {
+			return m.askDeleteCache(), nil
 		}
 		if k := msg.String(); (k == "e" || k == "d") && m.screen == screenTabs && m.tab == 1 {
 			return m.askWorkflow(k == "e"), nil
@@ -535,8 +595,25 @@ func (m Model) askWorkflow(enable bool) Model {
 			success: fmt.Sprintf("%s %s", done, wf.Name),
 			failure: fmt.Sprintf("%s %s", verb, wf.Name),
 			do:      func(ctx context.Context) error { return set(ctx, repo, wf.ID, enable) },
-			refresh: repo,
+			after:   m.loadWorkflows(repo),
 		}
+	}
+	return m
+}
+
+// askDeleteCache starts the y/n prompt to delete the cache under the cursor.
+func (m Model) askDeleteCache() Model {
+	repo, c, ok := m.cchs.Current()
+	if !ok {
+		return m
+	}
+	del := m.deps.DeleteCache
+	m.confirm = &pending{
+		prompt:  fmt.Sprintf("delete cache %s from %s", c.Key, repo),
+		success: "deleted cache " + c.Key,
+		failure: "delete cache " + c.Key,
+		do:      func(ctx context.Context) error { return del(ctx, repo, c.ID) },
+		after:   m.loadCaches(repo),
 	}
 	return m
 }
@@ -637,6 +714,10 @@ func (m Model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, m.loadWorkflows(m.repos...)
 		case 2:
 			return m, m.loadMetrics()
+		case 3:
+			return m, m.loadCaches(m.repos...)
+		case 4:
+			return m, m.loadRunners()
 		}
 		return m, nil
 	}
@@ -648,6 +729,10 @@ func (m Model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.wfs, cmd = m.wfs.Update(msg)
 	case 2:
 		m.mets, cmd = m.mets.Update(msg)
+	case 3:
+		m.cchs, cmd = m.cchs.Update(msg)
+	case 4:
+		m.rnrs, cmd = m.rnrs.Update(msg)
 	}
 	return m, cmd
 }
@@ -672,7 +757,7 @@ func (m Model) View() tea.View {
 
 	var bar []string
 	for i, t := range tabs {
-		label := fmt.Sprintf(" %d %s ", i+1, t.name)
+		label := fmt.Sprintf(" %d %s ", i+1, t)
 		if i == m.tab {
 			label = activeTab.Render(label)
 		}
@@ -693,10 +778,12 @@ func (m Model) View() tea.View {
 	case 2:
 		body = m.mets.View()
 		help = "j/k move  1-5 tabs  p repos  q quit"
-	default:
-		t := tabs[m.tab]
-		body = dimStyle.Render(fmt.Sprintf("%s is not built yet, it lands in milestone %d.", t.name, t.milestone))
-		help = "1-5 tabs  p repos  q quit"
+	case 3:
+		body = m.cchs.View()
+		help = "j/k move  d delete  1-5 tabs  p repos  q quit"
+	case 4:
+		body = m.rnrs.View()
+		help = "j/k move  1-5 tabs  p repos  q quit"
 	}
 	return screenView(top+"\n\n"+body, m.height-1, m.footer(help))
 }

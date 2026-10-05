@@ -1,5 +1,5 @@
 // Package actions sends requests that change things on GitHub: run reruns
-// and cancels, and workflow enable, disable and dispatch.
+// and cancels, workflow enable, disable and dispatch, and cache deletes.
 package actions
 
 import (
@@ -116,4 +116,10 @@ func send(ctx context.Context, client *http.Client, method, url string, body any
 	var apiErr struct{ Message string }
 	json.Unmarshal(msg, &apiErr)
 	return &StatusError{StatusCode: resp.StatusCode, Message: apiErr.Message}
+}
+
+// DeleteCache deletes cache id of repo.
+func DeleteCache(ctx context.Context, client *http.Client, baseURL, repo string, id int64) error {
+	url := fmt.Sprintf("%s/repos/%s/actions/caches/%d", strings.TrimSuffix(baseURL, "/"), repo, id)
+	return send(ctx, client, http.MethodDelete, url, nil)
 }

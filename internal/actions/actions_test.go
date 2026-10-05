@@ -141,3 +141,17 @@ func TestDispatchError(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 }
+
+func TestDeleteCache(t *testing.T) {
+	var gotMethod, gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	err := DeleteCache(context.Background(), srv.Client(), srv.URL, "o/r", 505)
+	if err != nil || gotMethod != http.MethodDelete || gotPath != "/repos/o/r/actions/caches/505" {
+		t.Errorf("err %v, sent %s %s", err, gotMethod, gotPath)
+	}
+}

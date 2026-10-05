@@ -12,9 +12,12 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/EvilNick2/gh-argus/internal/actions"
+	"github.com/EvilNick2/gh-argus/internal/caches"
+	"github.com/EvilNick2/gh-argus/internal/fetch"
 	"github.com/EvilNick2/gh-argus/internal/joblog"
 	"github.com/EvilNick2/gh-argus/internal/picker"
 	"github.com/EvilNick2/gh-argus/internal/repos"
+	"github.com/EvilNick2/gh-argus/internal/runners"
 	"github.com/EvilNick2/gh-argus/internal/runs"
 	"github.com/EvilNick2/gh-argus/internal/runsview"
 	"github.com/EvilNick2/gh-argus/internal/runview"
@@ -50,6 +53,12 @@ type fakeWatch struct {
 
 	recentCalls []string
 	recent      map[string][]runs.Run
+
+	runnerCalls []string
+	runnerErr   map[string]error
+	cacheCalls  []string
+	caches      map[string][]caches.Cache
+	deleted     []string
 }
 
 func (f *fakeWatch) deps() Deps {
@@ -91,6 +100,21 @@ func (f *fakeWatch) deps() Deps {
 		RecentRuns: func(ctx context.Context, repo string) ([]runs.Run, error) {
 			f.recentCalls = append(f.recentCalls, repo)
 			return f.recent[repo], nil
+		},
+		ListRunners: func(ctx context.Context, repo string) ([]runners.Runner, error) {
+			f.runnerCalls = append(f.runnerCalls, repo)
+			if err := f.runnerErr[repo]; err != nil {
+				return nil, err
+			}
+			return []runners.Runner{{ID: 21, Name: "dockhand-relay", OS: "Linux", Status: "online"}}, nil
+		},
+		ListCaches: func(ctx context.Context, repo string) ([]caches.Cache, error) {
+			f.cacheCalls = append(f.cacheCalls, repo)
+			return f.caches[repo], nil
+		},
+		DeleteCache: func(ctx context.Context, repo string, id int64) error {
+			f.deleted = append(f.deleted, fmt.Sprintf("%s/%d", repo, id))
+			return nil
 		},
 		Branches: func(ctx context.Context, repo string) ([]string, error) {
 			return []string{"dev", "main"}, nil
@@ -901,5 +925,58 @@ func TestMetricsTabLoadsRecentRunsPerRepo(t *testing.T) {
 	}
 	if strings.Contains(v, "not built yet") {
 		t.Errorf("placeholder shown:\n%s", v)
+	}
+}
+
+func TestRunnersTabShowsRunnersAndNotPermitted(t *testing.T) {
+	f := &fakeWatch{runnerErr: map[string]error{"o/b": &fetch.StatusError{StatusCode: 404, Path: "/x"}}}
+	m := sized(New(f.deps(), newPicker(), []string{"o/a", "o/b"}))
+
+	m, cmd := step(m, keyMsg("5"))
+	m = runAll(m, cmd)
+	if !slices.Equal(f.runnerCalls, []string{"o/a", "o/b"}) {
+		t.Errorf("runner loads %v", f.runnerCalls)
+	}
+	v := view(m)
+	if !strings.Contains(v, "dockhand-relay") || !strings.Contains(v, "not permitted") || strings.Contains(v, "not built yet") {
+		t.Errorf("view:\n%s", v)
+	}
+}
+
+func TestDeleteCacheConfirmsThenReloads(t *testing.T) {
+	f := &fakeWatch{caches: map[string][]caches.Cache{
+		"o/a": {{ID: 505, Key: "Linux-node-208b2f", Ref: "refs/heads/main", SizeInBytes: 2048}},
+	}}
+	m := sized(New(f.deps(), newPicker(), []string{"o/a"}))
+	m, cmd := step(m, keyMsg("4"))
+	m = runAll(m, cmd)
+
+	m, _ = step(m, keyMsg("d"))
+	if v := view(m); !strings.Contains(v, "delete cache Linux-node-208b2f from o/a? y/n") {
+		t.Fatalf("no prompt:\n%s", v)
+	}
+	loads := len(f.cacheCalls)
+	m, cmd = step(m, keyMsg("y"))
+	m = runAll(m, cmd)
+	if len(f.deleted) != 1 || f.deleted[0] != "o/a/505" {
+		t.Errorf("deleted %v", f.deleted)
+	}
+	if len(f.cacheCalls) != loads+1 {
+		t.Errorf("caches not reloaded after delete: %v", f.cacheCalls)
+	}
+	if v := view(m); !strings.Contains(v, "deleted cache Linux-node-208b2f") {
+		t.Errorf("view:\n%s", v)
+	}
+}
+
+func TestDOnEmptyCacheTabDoesNothing(t *testing.T) {
+	f := &fakeWatch{}
+	m := sized(New(f.deps(), newPicker(), []string{"o/a"}))
+	m, cmd := step(m, keyMsg("4"))
+	m = runAll(m, cmd)
+
+	m, _ = step(m, keyMsg("d"))
+	if v := view(m); strings.Contains(v, "y/n") || !strings.Contains(v, "no caches") {
+		t.Errorf("view:\n%s", v)
 	}
 }
