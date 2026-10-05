@@ -156,6 +156,7 @@ Time:2026-10-05T09:10:00.8892206Z</Message></Error>`
 		{StatusError{StatusCode: 404, Body: blob}, "fetching log: 404 Not Found"},
 		{StatusError{StatusCode: 403, Body: `{"message":"Must have admin rights to Repository.","status":"403"}`}, "fetching log: 403 Must have admin rights to Repository."},
 		{StatusError{StatusCode: 502, Body: ""}, "fetching log: 502 Bad Gateway"},
+		{StatusError{StatusCode: 410, Body: `{"message":"Server Error","status":"410"}`}, "fetching log: 410 log expired, GitHub deletes logs after the repo's retention period"},
 	}
 	for _, c := range cases {
 		if got := c.err.Error(); got != c.want {

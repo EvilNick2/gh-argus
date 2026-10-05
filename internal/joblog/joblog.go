@@ -119,7 +119,11 @@ type StatusError struct {
 func (e *StatusError) Error() string {
 	var body struct{ Message string }
 	text := http.StatusText(e.StatusCode)
-	if json.Unmarshal([]byte(e.Body), &body) == nil && body.Message != "" {
+	switch {
+	case e.StatusCode == http.StatusGone:
+		// GitHub's message for an expired log is only "Server Error".
+		text = "log expired, GitHub deletes logs after the repo's retention period"
+	case json.Unmarshal([]byte(e.Body), &body) == nil && body.Message != "":
 		text = body.Message
 	}
 	return fmt.Sprintf("fetching log: %d %s", e.StatusCode, text)
