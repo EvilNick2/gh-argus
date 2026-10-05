@@ -28,24 +28,24 @@ var darkPalette = Palette{
 	Plume:     lipgloss.Color("#2AA7B8"),
 	Eye:       lipgloss.Color("#E0B341"),
 	Pass:      lipgloss.Color("#3FB97F"),
-	Fail:      lipgloss.Color("#E5534B"),
+	Fail:      lipgloss.Color("#F47067"),
 	Text:      lipgloss.Color("#E6EDF3"),
-	Muted:     lipgloss.Color("#8B95A1"),
+	Muted:     lipgloss.Color("#939DA9"),
 	Frame:     lipgloss.Color("#3A4450"),
 	Bar:       lipgloss.Color("#1C232B"),
 	Selection: lipgloss.Color("#24303A"),
 }
 
 var lightPalette = Palette{
-	Plume:     lipgloss.Color("#12798A"),
-	Eye:       lipgloss.Color("#A67C10"),
-	Pass:      lipgloss.Color("#1A7F4E"),
-	Fail:      lipgloss.Color("#C0362C"),
+	Plume:     lipgloss.Color("#0C6575"),
+	Eye:       lipgloss.Color("#7A5A00"),
+	Pass:      lipgloss.Color("#126B42"),
+	Fail:      lipgloss.Color("#B02E25"),
 	Text:      lipgloss.Color("#1F2328"),
-	Muted:     lipgloss.Color("#6A737D"),
-	Frame:     lipgloss.Color("#C9D1D9"),
-	Bar:       lipgloss.Color("#EEF1F4"),
-	Selection: lipgloss.Color("#DDE7EC"),
+	Muted:     lipgloss.Color("#545E68"),
+	Frame:     lipgloss.Color("#A5AEB8"),
+	Bar:       lipgloss.Color("#E2E7EC"),
+	Selection: lipgloss.Color("#D2E1E9"),
 }
 
 var p = darkPalette

@@ -1,9 +1,12 @@
 package theme
 
 import (
+	"image/color"
+	"math"
 	"strings"
 	"testing"
 
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -143,6 +146,60 @@ func TestStateWord(t *testing.T) {
 	for _, c := range cases {
 		if got := StateWord(c.status, c.conclusion); got != c.want {
 			t.Errorf("StateWord(%s, %s) = %q, want %q", c.status, c.conclusion, got, c.want)
+		}
+	}
+}
+
+func luminance(c color.Color) float64 {
+	r, g, b, _ := c.RGBA()
+	lin := func(v uint32) float64 {
+		x := float64(v) / 0xffff
+		if x <= 0.03928 {
+			return x / 12.92
+		}
+		return math.Pow((x+0.055)/1.055, 2.4)
+	}
+	return 0.2126*lin(r) + 0.7152*lin(g) + 0.0722*lin(b)
+}
+
+// contrast is the WCAG contrast ratio between two colours.
+func contrast(a, b color.Color) float64 {
+	la, lb := luminance(a), luminance(b)
+	return (max(la, lb) + 0.05) / (min(la, lb) + 0.05)
+}
+
+// TestTextIsReadable checks every text colour reaches 4.5:1 on the
+// terminal backgrounds each variant is meant for, on the bars and on a
+// selected row, and that idle pane borders stay visible.
+func TestTextIsReadable(t *testing.T) {
+	variants := []struct {
+		name     string
+		p        Palette
+		terminal []string
+	}{
+		// GitHub dark, Windows Terminal Campbell, and black.
+		{"dark", darkPalette, []string{"#0D1117", "#0C0C0C", "#000000"}},
+		// White, One Half Light, and Solarized Light.
+		{"light", lightPalette, []string{"#FFFFFF", "#FAFAFA", "#FDF6E3"}},
+	}
+	for _, v := range variants {
+		var surfaces []color.Color
+		for _, hex := range v.terminal {
+			surfaces = append(surfaces, lipgloss.Color(hex))
+		}
+		surfaces = append(surfaces, v.p.Bar, v.p.Selection)
+		text := map[string]color.Color{"Plume": v.p.Plume, "Eye": v.p.Eye, "Pass": v.p.Pass, "Fail": v.p.Fail, "Text": v.p.Text, "Muted": v.p.Muted}
+		for name, fg := range text {
+			for _, bg := range surfaces {
+				if c := contrast(fg, bg); c < 4.5 {
+					t.Errorf("%s %s on %v: %.2f, want 4.5", v.name, name, bg, c)
+				}
+			}
+		}
+		for _, hex := range v.terminal {
+			if c := contrast(v.p.Frame, lipgloss.Color(hex)); c < 1.8 {
+				t.Errorf("%s Frame on %s: %.2f, want 1.8", v.name, hex, c)
+			}
 		}
 	}
 }
