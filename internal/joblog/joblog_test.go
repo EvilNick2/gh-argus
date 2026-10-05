@@ -144,3 +144,22 @@ func TestParseDropsStrayControlCharacters(t *testing.T) {
 		t.Fatalf("got %q", texts(got))
 	}
 }
+
+func TestStatusErrorIsOneShortLine(t *testing.T) {
+	blob := `<?xml version="1.0" encoding="utf-8"?><Error><Code>BlobNotFound</Code><Message>The specified blob does not exist.
+RequestId:690eb47b
+Time:2026-10-05T09:10:00.8892206Z</Message></Error>`
+	cases := []struct {
+		err  StatusError
+		want string
+	}{
+		{StatusError{StatusCode: 404, Body: blob}, "fetching log: 404 Not Found"},
+		{StatusError{StatusCode: 403, Body: `{"message":"Must have admin rights to Repository.","status":"403"}`}, "fetching log: 403 Must have admin rights to Repository."},
+		{StatusError{StatusCode: 502, Body: ""}, "fetching log: 502 Bad Gateway"},
+	}
+	for _, c := range cases {
+		if got := c.err.Error(); got != c.want {
+			t.Errorf("Error() = %q, want %q", got, c.want)
+		}
+	}
+}

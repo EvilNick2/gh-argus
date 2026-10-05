@@ -4,6 +4,7 @@ package joblog
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -111,8 +112,15 @@ type StatusError struct {
 	Body       string
 }
 
+// Error gives GitHub's message when the body carries one, and otherwise the
+// status text, since the log host answers errors with a page of XML.
 func (e *StatusError) Error() string {
-	return fmt.Sprintf("fetching log: %d %s", e.StatusCode, strings.TrimSpace(e.Body))
+	var body struct{ Message string }
+	text := http.StatusText(e.StatusCode)
+	if json.Unmarshal([]byte(e.Body), &body) == nil && body.Message != "" {
+		text = body.Message
+	}
+	return fmt.Sprintf("fetching log: %d %s", e.StatusCode, text)
 }
 
 // Fetch downloads the log of job id. The API answers with a redirect to the
