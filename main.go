@@ -26,6 +26,7 @@ import (
 	"github.com/EvilNick2/gh-argus/internal/runs"
 	"github.com/EvilNick2/gh-argus/internal/snapshot"
 	"github.com/EvilNick2/gh-argus/internal/store"
+	"github.com/EvilNick2/gh-argus/internal/version"
 	"github.com/EvilNick2/gh-argus/internal/watch"
 	"github.com/EvilNick2/gh-argus/internal/workflows"
 )
@@ -48,7 +49,12 @@ func run() error {
 		given = append(given, s)
 		return nil
 	})
+	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
+	if *showVersion {
+		fmt.Println("gh argus", version.String())
+		return nil
+	}
 
 	st, err := store.Open()
 	if err != nil {
@@ -201,7 +207,8 @@ func run() error {
 		SetWorkflow: func(ctx context.Context, repo string, id int64, enabled bool) error {
 			return actions.SetWorkflowEnabled(ctx, client, apiURL, repo, id, enabled)
 		},
-		Now: time.Now,
+		Now:     time.Now,
+		Version: version.String(),
 	}
 
 	stopFlush := make(chan struct{})

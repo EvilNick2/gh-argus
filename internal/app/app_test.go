@@ -1883,3 +1883,14 @@ func TestNoBellWhenARunStarts(t *testing.T) {
 		t.Error("bell for a run that only started")
 	}
 }
+
+func TestHeaderShowsVersion(t *testing.T) {
+	f := &fakeWatch{}
+	d := f.deps()
+	d.Version = "v0.1.0-rc.1"
+	m := sized(New(d, newPicker(), []string{"o/r"}))
+
+	if l := strings.Split(view(m), "\n")[0]; !strings.Contains(l, "argus v0.1.0-rc.1  watching 1 repo") {
+		t.Errorf("header %q", l)
+	}
+}

@@ -76,6 +76,8 @@ type Deps struct {
 	// SetWorkflow enables or disables a workflow.
 	SetWorkflow func(ctx context.Context, repo string, id int64, enabled bool) error
 	Now         func() time.Time
+	// Version names the build, for the header.
+	Version string
 }
 
 type screen int
@@ -1162,7 +1164,10 @@ func (m Model) frame(body string, withTabs bool, height int, help string) tea.Vi
 	if n == 1 {
 		watching = "watching 1 repo"
 	}
-	lines := []string{theme.Bar(theme.Accent().Render(" argus")+theme.Muted().Render("  "+watching), m.requestsLeft(), m.width)}
+	if m.deps.Version != "" {
+		watching = m.deps.Version + "  " + watching
+	}
+	lines := []string{theme.Bar(theme.Accent().Render(" argus")+theme.Muted().Render(" "+watching), m.requestsLeft(), m.width)}
 	if withTabs {
 		var labels []string
 		for i := range tabs {
