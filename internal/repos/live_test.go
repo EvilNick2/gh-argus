@@ -2,7 +2,9 @@ package repos
 
 import (
 	"context"
+	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -49,4 +51,35 @@ func TestLiveListAndStatuses(t *testing.T) {
 	for _, n := range names {
 		t.Logf("  %-40s %v", n, st[n])
 	}
+}
+
+// TestLiveBranchesFollowsPages lists cli/cli's branches, which run past one
+// page of 100. Run with ARGUS_LIVE=1 and -v.
+func TestLiveBranchesFollowsPages(t *testing.T) {
+	if os.Getenv("ARGUS_LIVE") == "" {
+		t.Skip("set ARGUS_LIVE=1 to run against api.github.com")
+	}
+	rest, err := api.DefaultRESTClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	get := func(ctx context.Context, path string) ([]byte, error) {
+		var raw json.RawMessage
+		err := rest.DoWithContext(ctx, "GET", strings.TrimPrefix(path, "/"), nil, &raw)
+		return raw, err
+	}
+
+	got, err := Branches(context.Background(), get, "cli/cli")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("cli/cli: %d branches", len(got))
+	if len(got) <= 100 {
+		t.Errorf("got %d branches, want more than one page", len(got))
+	}
+	envs, err := Environments(context.Background(), get, "EvilNick2/infra")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("EvilNick2/infra environments: %v", envs)
 }
