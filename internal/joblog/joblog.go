@@ -45,7 +45,9 @@ var markers = []struct {
 }
 
 // Parse splits a job log into display lines. It drops the byte order mark,
-// timestamps and ##[endgroup] lines, keeps only the text after the last
+// timestamps, ##[endgroup] lines and the start-action and end-action lines
+// around a composite action's steps, which repeat the group line after them
+// or only record its outcome. It keeps only the text after the last
 // carriage return of a line, and strips every escape sequence, since logs
 // carry whatever the job's tools printed.
 func Parse(body []byte) []Line {
@@ -64,7 +66,7 @@ func Parse(body []byte) []Line {
 		}
 		s = strings.Map(dropControl, expandTabs(ansi.Strip(s)))
 
-		if s == "##[endgroup]" {
+		if s == "##[endgroup]" || strings.HasPrefix(s, "##[start-action ") || strings.HasPrefix(s, "##[end-action ") {
 			continue
 		}
 		line := Line{Kind: Plain, Text: s}

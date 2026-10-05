@@ -163,3 +163,15 @@ Time:2026-10-05T09:10:00.8892206Z</Message></Error>`
 		}
 	}
 }
+
+func TestParseDropsCompositeActionMarkers(t *testing.T) {
+	body := "2026-10-05T09:30:00.1Z ##[start-action display=Run actions/setup-go@4a36;id=__cli_gh-extension-precompile.__actions_setup-go]\n" +
+		"2026-10-05T09:30:00.2Z ##[group]Run actions/setup-go@4a36\n" +
+		"2026-10-05T09:30:00.3Z ##[endgroup]\n" +
+		"2026-10-05T09:30:08.4Z ##[end-action id=__cli_gh-extension-precompile.__actions_setup-go;outcome=success;conclusion=success;duration_ms=8445]\n"
+
+	got := Parse([]byte(body))
+	if len(got) != 1 || got[0].Kind != Group || got[0].Text != "Run actions/setup-go@4a36" {
+		t.Fatalf("got %+v, want only the group line", got)
+	}
+}
