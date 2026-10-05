@@ -30,6 +30,7 @@ type Set struct {
 	mu      sync.Mutex
 	entries map[string]entry
 	dirty   bool
+	seeded  map[string]bool
 }
 
 func Load(st *store.Store, now func() time.Time) (*Set, error) {
@@ -80,4 +81,22 @@ func (s *Set) Flush() error {
 	}
 	s.dirty = false
 	return nil
+}
+
+// SeedOnce is Seed for a repo's first watch of the session, and nil after.
+// A later watch of the same repo, after picking repos again, would otherwise
+// compare against runs this session saved and mark them as changed since
+// the last session.
+func (s *Set) SeedOnce(repo string) *watch.Seed {
+	s.mu.Lock()
+	seen := s.seeded[repo]
+	if s.seeded == nil {
+		s.seeded = map[string]bool{}
+	}
+	s.seeded[repo] = true
+	s.mu.Unlock()
+	if seen {
+		return nil
+	}
+	return s.Seed(repo)
 }

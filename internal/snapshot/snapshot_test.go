@@ -104,3 +104,19 @@ func TestConcurrentRecordAndFlush(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+func TestSeedOnceSeedsOnlyTheFirstWatchOfARepo(t *testing.T) {
+	st := store.New(t.TempDir())
+	s, _ := Load(st, clock)
+	s.Record(watch.Event{Repo: "o/r", Initial: true, Runs: ciRuns, ETag: `"e"`})
+
+	if s.SeedOnce("o/r") == nil {
+		t.Fatal("first watch got no seed")
+	}
+	if seed := s.SeedOnce("o/r"); seed != nil {
+		t.Errorf("second watch in the same session got seed %+v", seed)
+	}
+	if s.SeedOnce("o/other") != nil {
+		t.Error("repo with nothing saved got a seed")
+	}
+}
