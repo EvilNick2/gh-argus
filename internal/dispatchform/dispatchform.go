@@ -39,6 +39,7 @@ type Model struct {
 	repo     string
 	wf       workflows.Workflow
 	branches []string
+	envs     []string
 	// fields[0] is the branch, the workflow's inputs follow.
 	fields []field
 	cursor int
@@ -104,13 +105,10 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		if k.String() == "space" {
 			f.value = strconv.FormatBool(f.value != "true")
 		}
-	case "choice", branchType:
-		opts := f.in.Options
-		if f.in.Type == branchType {
-			opts = m.branches
-		}
+	case "choice", branchType, "environment":
+		opts, typing := m.picks(*f)
 		if len(opts) == 0 || k.String() != "left" && k.String() != "right" {
-			if f.in.Type == branchType {
+			if typing {
 				editText(f, k)
 			}
 			break
@@ -210,8 +208,12 @@ func (m Model) lines() ([]string, []int) {
 			if i == m.cursor {
 				value += theme.Accent().Render("_")
 			}
-			if f.in.Type == branchType && i == m.cursor && len(m.branches) > 0 {
-				value += theme.Muted().Render(fmt.Sprintf("  left/right picks from %d branches", len(m.branches)))
+			if opts, _ := m.picks(f); i == m.cursor && len(opts) > 0 {
+				noun := "branches"
+				if f.in.Type == "environment" {
+					noun = "environments"
+				}
+				value += theme.Muted().Render(fmt.Sprintf("  left/right picks from %d %s", len(opts), noun))
 			}
 		}
 		row := " " + theme.Bold().Render(name) + "  " + theme.Text().Render(value)
@@ -255,4 +257,58 @@ func (m Model) Mouse(ev mouse.Event) (Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+// WithEnvironments sets the repo's deployment environments, which left and
+// right cycle environment inputs through.
+func (m Model) WithEnvironments(envs []string) Model {
+	m.envs = envs
+	return m
+}
+
+// picks returns the values left and right cycle a field through, and
+// whether the field also takes typing.
+func (m Model) picks(f field) ([]string, bool) {
+	switch f.in.Type {
+	case "choice":
+		return f.in.Options, false
+	case branchType:
+		return m.branches, true
+	case "environment":
+		return m.envs, true
+	}
+	return nil, true
+}
+
+// WithValues fills inputs with values typed into an earlier form, by name,
+// and focuses the first required input left empty. A boolean takes only true
+// or false and a choice only one of its options, so a value that no longer
+// fits leaves the default.
+func (m Model) WithValues(values map[string]string) Model {
+	for i := 1; i < len(m.fields); i++ {
+		f := &m.fields[i]
+		v, ok := values[f.in.Name]
+		switch {
+		case !ok:
+		case f.in.Type == "boolean" && v != "true" && v != "false":
+		case f.in.Type == "choice" && !slices.Contains(f.in.Options, v):
+		default:
+			f.value = v
+		}
+	}
+	// Focus the first required input still empty, which needs filling in.
+	for i := 1; i < len(m.fields); i++ {
+		if f := m.fields[i]; f.in.Required && strings.TrimSpace(f.value) == "" {
+			m.cursor = i
+			break
+		}
+	}
+	return m
+}
+
+// WithMessage shows msg in the form until the next key, such as why it is
+// still open after submitting.
+func (m Model) WithMessage(msg string) Model {
+	m.err = msg
+	return m
 }

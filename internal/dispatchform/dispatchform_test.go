@@ -343,3 +343,65 @@ func TestWheelMovesFocus(t *testing.T) {
 		t.Errorf("force %q, want the wheel to have moved focus from tag to force", got)
 	}
 }
+
+func TestEnvironmentInputCyclesEnvironments(t *testing.T) {
+	ins := []workflows.Input{{Name: "target", Type: "environment", Required: true}}
+	m := newModel(ins).WithEnvironments([]string{"github-pages", "production"})
+
+	if v := view(m); !strings.Contains(v, "2 environments") {
+		t.Errorf("no environment hint:\n%s", v)
+	}
+	m, _ = send(m, key("right"), key("right"))
+	_, cmd := send(m, key("enter"))
+	if got := submitted(t, cmd)["target"]; got != "production" {
+		t.Errorf("target %q, want production", got)
+	}
+}
+
+func TestEnvironmentInputStillTakesTyping(t *testing.T) {
+	ins := []workflows.Input{{Name: "target", Type: "environment"}}
+	m := newModel(ins).WithEnvironments([]string{"github-pages"})
+
+	_, cmd := send(m, append(typed("staging"), key("enter"))...)
+	if got := submitted(t, cmd)["target"]; got != "staging" {
+		t.Errorf("target %q", got)
+	}
+}
+
+func TestWithValuesCarriesMatchingFields(t *testing.T) {
+	m := newModel(inputs).WithValues(map[string]string{"tag": "clap-1", "force": "true", "gone": "x"})
+
+	_, cmd := send(m, key("enter"))
+	got := submitted(t, cmd)
+	if got["tag"] != "clap-1" || got["force"] != "true" || got["gone"] != "" {
+		t.Errorf("inputs %v", got)
+	}
+}
+
+func TestWithValuesIgnoresInvalidChoice(t *testing.T) {
+	m := newModel(inputs).WithValues(map[string]string{"level": "verbose"})
+
+	_, cmd := send(m, key("enter"))
+	if got := submitted(t, cmd)["level"]; got != "info" {
+		t.Errorf("level %q, want the default kept over an option that does not exist", got)
+	}
+}
+
+func TestWithMessageShowsIt(t *testing.T) {
+	m := newModel(inputs).WithMessage("the inputs differ on dev, check them and run again")
+
+	if v := view(m); !strings.Contains(v, "the inputs differ on dev") {
+		t.Errorf("view:\n%s", v)
+	}
+}
+
+func TestWithValuesFocusesFirstEmptyRequiredField(t *testing.T) {
+	ins := []workflows.Input{{Name: "tag", Type: "string"}, {Name: "channel", Type: "string", Required: true}}
+	m := newModel(ins).WithValues(map[string]string{"tag": "x"})
+
+	m, _ = send(m, typed("beta")...)
+	_, cmd := send(m, key("enter"))
+	if got := submitted(t, cmd); got["channel"] != "beta" || got["tag"] != "x" {
+		t.Errorf("inputs %v, want typing to land in the empty required channel", got)
+	}
+}
