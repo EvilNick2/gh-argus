@@ -416,3 +416,169 @@ func TestWheelMovesSelectionInPaneUnderPointer(t *testing.T) {
 		t.Errorf("wheel over repos: %q, want orpheus", repo)
 	}
 }
+
+func typeFilter(m Model, s string) Model {
+	m, _ = send(m, key("/"))
+	for _, r := range s {
+		m, _ = send(m, key(string(r)))
+	}
+	return m
+}
+
+func enterKey() tea.Msg { return tea.KeyPressMsg{Code: tea.KeyEnter} }
+func escKey() tea.Msg   { return tea.KeyPressMsg{Code: tea.KeyEscape} }
+
+func TestFilterNarrowsRunsByTitle(t *testing.T) {
+	m := typeFilter(newModel(t), "setup")
+
+	v := ansi.Strip(m.View())
+	if !strings.Contains(v, "docs: setup notes") || strings.Contains(v, "feat: add wrapper") {
+		t.Errorf("filter on title:\n%s", v)
+	}
+	if !strings.Contains(v, "1 of 2 runs match /setup") {
+		t.Errorf("no match count:\n%s", v)
+	}
+	if _, r, _ := m.Current(); r.ID != 15 {
+		t.Errorf("Current() = %d, want the only match 15", r.ID)
+	}
+}
+
+func TestFilterMatchesStateWordsBranchAndNumber(t *testing.T) {
+	cases := map[string]int64{"running": 16, "passed": 15, "#15": 15}
+	for q, want := range cases {
+		m := typeFilter(newModel(t), q)
+		if _, r, ok := m.Current(); !ok || r.ID != want {
+			t.Errorf("/%s: Current() = %d, %v, want %d", q, r.ID, ok, want)
+		}
+	}
+	m := typeFilter(newModel(t), "MAIN")
+	if v := ansi.Strip(m.View()); !strings.Contains(v, "2 of 2 runs match") {
+		t.Errorf("/MAIN not matching both runs on main, ignoring case:\n%s", v)
+	}
+}
+
+func TestFilteringTakesEveryKeyAsText(t *testing.T) {
+	m := typeFilter(newModel(t), "x")
+
+	if !m.Filtering() {
+		t.Fatal("Filtering() false while typing")
+	}
+	m, cmd := send(m, key("q"), key("j"), key("k"))
+	if cmd != nil {
+		t.Error("keys acted while typing a filter")
+	}
+	if v := ansi.Strip(m.View()); !strings.Contains(v, "/xqjk") {
+		t.Errorf("view:\n%s", v)
+	}
+}
+
+func TestEnterKeepsFilterAndEscClearsIt(t *testing.T) {
+	m := typeFilter(newModel(t), "setup")
+	m, _ = send(m, enterKey())
+
+	if m.Filtering() {
+		t.Error("still typing after enter")
+	}
+	if _, r, _ := m.Current(); r.ID != 15 {
+		t.Errorf("filter not kept: Current() = %d", r.ID)
+	}
+	m, _ = send(m, escKey())
+	if v := ansi.Strip(m.View()); !strings.Contains(v, "feat: add wrapper") || strings.Contains(v, "match") {
+		t.Errorf("esc did not clear the filter:\n%s", v)
+	}
+}
+
+func TestEscWhileTypingClearsFilter(t *testing.T) {
+	m := typeFilter(newModel(t), "setup")
+	m, _ = send(m, escKey())
+
+	if m.Filtering() || strings.Contains(ansi.Strip(m.View()), "match") {
+		t.Error("esc while typing did not clear and close the filter")
+	}
+}
+
+func TestEnterOpensFilteredRun(t *testing.T) {
+	m := typeFilter(newModel(t), "setup")
+	m, _ = send(m, enterKey(), key("tab"))
+
+	_, cmd := send(m, enterKey())
+	if cmd == nil {
+		t.Fatal("no command")
+	}
+	if msg := cmd().(OpenRunMsg); msg.Run.ID != 15 {
+		t.Errorf("opened %d, want the filtered run 15", msg.Run.ID)
+	}
+}
+
+func TestFilterWithNoMatches(t *testing.T) {
+	m := typeFilter(newModel(t), "zzz")
+
+	if v := ansi.Strip(m.View()); !strings.Contains(v, "0 of 2 runs match /zzz") {
+		t.Errorf("view:\n%s", v)
+	}
+	if _, _, ok := m.Current(); ok {
+		t.Error("Current() ok with nothing matching")
+	}
+}
+
+func TestClickUsesFilteredRows(t *testing.T) {
+	m := typeFilter(newModel(t), "setup")
+	m, _ = send(m, enterKey())
+
+	_, cmd := m.Mouse(double(40, 2))
+	if cmd == nil {
+		t.Fatal("no command")
+	}
+	if msg := cmd().(OpenRunMsg); msg.Run.ID != 15 {
+		t.Errorf("double click opened %d, want the first filtered row 15", msg.Run.ID)
+	}
+}
+
+func space() tea.Msg { return tea.KeyPressMsg{Code: tea.KeySpace, Text: " "} }
+
+func TestSpaceMarksRuns(t *testing.T) {
+	m := newModel(t)
+	m, _ = send(m, key("tab"), space(), key("j"), space())
+
+	repo, marked := m.Marked()
+	if repo != "EvilNick2/dotfiles" || len(marked) != 2 || marked[0].ID != 16 || marked[1].ID != 15 {
+		t.Errorf("Marked() = %q %v", repo, marked)
+	}
+	v := ansi.Strip(m.View())
+	if l := runRow(t, v, "#16"); !strings.Contains(l, ">* #16") {
+		t.Errorf("marked row %q, want > before the icon", l)
+	}
+	if !strings.Contains(v, "2 marked") {
+		t.Errorf("no marked count:\n%s", v)
+	}
+	m, _ = send(m, space())
+	if _, marked := m.Marked(); len(marked) != 1 {
+		t.Errorf("space twice did not unmark: %v", marked)
+	}
+}
+
+func TestSpaceInReposPaneDoesNotMark(t *testing.T) {
+	m, _ := send(newModel(t), space())
+
+	if _, marked := m.Marked(); len(marked) != 0 {
+		t.Errorf("marked %v from the repos pane", marked)
+	}
+}
+
+func TestClearMarks(t *testing.T) {
+	m, _ := send(newModel(t), key("tab"), space())
+
+	m = m.ClearMarks()
+	if _, marked := m.Marked(); len(marked) != 0 {
+		t.Errorf("marks left: %v", marked)
+	}
+}
+
+func TestRemoveDropsRunsAtOnce(t *testing.T) {
+	m := newModel(t).Remove("EvilNick2/dotfiles", []int64{16})
+
+	v := ansi.Strip(m.View())
+	if strings.Contains(v, "#16") || !strings.Contains(v, "#15") {
+		t.Errorf("view:\n%s", v)
+	}
+}

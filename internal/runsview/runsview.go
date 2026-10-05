@@ -4,6 +4,7 @@ package runsview
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -34,6 +35,8 @@ type repoState struct {
 	fresh map[int64]bool
 	// unseen marks a repo with fresh runs that has not been highlighted.
 	unseen bool
+	// marked holds runs marked with space, such as for deleting.
+	marked map[int64]bool
 }
 
 type Model struct {
@@ -42,6 +45,9 @@ type Model struct {
 	now   func() time.Time
 
 	focusRuns bool
+	// filter narrows the runs shown, typing is set while it is being typed.
+	filter    string
+	typing    bool
 	repoIdx   int
 	runIdx    int
 	runOffset int
@@ -81,11 +87,39 @@ func (m Model) Seed(repo string, rs []runs.Run) Model {
 
 // Current returns the run under the runs cursor, which actions apply to.
 func (m Model) Current() (string, runs.Run, bool) {
-	st := m.current()
-	if len(st.runs) == 0 {
+	shown := m.shown()
+	if len(shown) == 0 {
 		return "", runs.Run{}, false
 	}
-	return m.repos[m.repoIdx], st.runs[m.runIdx], true
+	return m.repos[m.repoIdx], shown[m.runIdx], true
+}
+
+// Filtering reports that a filter is being typed, so keys are text.
+func (m Model) Filtering() bool {
+	return m.typing
+}
+
+// shown is the highlighted repo's runs that match the filter.
+func (m Model) shown() []runs.Run {
+	return m.filtered(m.current().runs)
+}
+
+// filtered keeps the runs matching the filter, ignoring case, by workflow,
+// title, branch, number or state in words.
+func (m Model) filtered(rs []runs.Run) []runs.Run {
+	if m.filter == "" {
+		return rs
+	}
+	q := strings.ToLower(m.filter)
+	var out []runs.Run
+	for _, r := range rs {
+		hay := strings.ToLower(strings.Join([]string{r.Name, r.DisplayTitle, r.HeadBranch,
+			fmt.Sprintf("#%d", r.RunNumber), theme.StateWord(r.Status, r.Conclusion)}, " "))
+		if strings.Contains(hay, q) {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // rows is how many two-line runs fit in the runs pane, inside its border
@@ -95,7 +129,7 @@ func (m Model) rows() int {
 }
 
 func (m *Model) clamp() {
-	n := len(m.current().runs)
+	n := len(m.shown())
 	m.runIdx = max(0, min(m.runIdx, n-1))
 	if m.runIdx < m.runOffset {
 		m.runOffset = m.runIdx
@@ -123,8 +157,8 @@ func (m *Model) apply(ev watch.Event) {
 	}
 	// Keep the cursor on the same run when new runs push it down.
 	var keep int64 = -1
-	if ev.Repo == m.repos[m.repoIdx] && m.runIdx < len(st.runs) {
-		keep = st.runs[m.runIdx].ID
+	if shown := m.filtered(st.runs); ev.Repo == m.repos[m.repoIdx] && m.runIdx < len(shown) {
+		keep = shown[m.runIdx].ID
 	}
 	st.err = ev.Err
 	if ev.Err == nil {
@@ -142,7 +176,7 @@ func (m *Model) apply(ev watch.Event) {
 		st.unseen = ev.Repo != m.repos[m.repoIdx]
 	}
 	if keep >= 0 {
-		for i, r := range st.runs {
+		for i, r := range m.filtered(st.runs) {
 			if r.ID == keep {
 				m.runIdx = i
 			}
@@ -152,7 +186,45 @@ func (m *Model) apply(ev watch.Event) {
 }
 
 func (m Model) key(msg tea.KeyPressMsg) (Model, tea.Cmd) {
+	if m.typing {
+		switch msg.String() {
+		case "enter":
+			m.typing = false
+		case "esc":
+			m.typing, m.filter = false, ""
+		case "backspace":
+			if r := []rune(m.filter); len(r) > 0 {
+				m.filter = string(r[:len(r)-1])
+			}
+		default:
+			m.filter += msg.Text
+		}
+		m.runIdx, m.runOffset = 0, 0
+		m.clamp()
+		return m, nil
+	}
 	switch msg.String() {
+	case "/":
+		m.typing, m.filter = true, ""
+		m.runIdx, m.runOffset = 0, 0
+		m.clamp()
+	case "esc":
+		if m.filter != "" {
+			m.filter, m.runIdx, m.runOffset = "", 0, 0
+			m.clamp()
+		}
+	case "space":
+		if _, r, ok := m.Current(); ok && m.focusRuns {
+			st := m.current()
+			if st.marked == nil {
+				st.marked = map[int64]bool{}
+			}
+			if st.marked[r.ID] {
+				delete(st.marked, r.ID)
+			} else {
+				st.marked[r.ID] = true
+			}
+		}
 	case "tab":
 		m.focusRuns = !m.focusRuns
 	case "up", "k":
@@ -168,11 +240,11 @@ func (m Model) key(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 			m.focusRuns = true
 			break
 		}
-		st := m.current()
-		if len(st.runs) == 0 {
+		shown := m.shown()
+		if len(shown) == 0 {
 			break
 		}
-		open := OpenRunMsg{Repo: m.repos[m.repoIdx], Run: st.runs[m.runIdx]}
+		open := OpenRunMsg{Repo: m.repos[m.repoIdx], Run: shown[m.runIdx]}
 		return m, func() tea.Msg { return open }
 	}
 	return m, nil
@@ -260,6 +332,7 @@ func (m Model) View() string {
 	}
 
 	st := m.current()
+	shown := m.shown()
 	var body []string
 	switch {
 	case st.err != nil:
@@ -270,17 +343,31 @@ func (m Model) View() string {
 		body = append(body, " "+theme.Muted().Render("waiting for first poll"))
 	case len(st.runs) == 0:
 		body = append(body, " "+theme.Muted().Render("no runs"))
+	case m.typing || m.filter != "":
+		cursor := ""
+		if m.typing {
+			cursor = theme.Accent().Render("_")
+		}
+		body = append(body, " "+theme.Muted().Render(fmt.Sprintf("%d of %d runs match /", len(shown), len(st.runs)))+
+			theme.Text().Render(m.filter)+cursor)
 	default:
 		body = append(body, " "+theme.Muted().Render(fmt.Sprintf("%d recent runs", len(st.runs))))
 	}
-	end := min(len(st.runs), m.runOffset+m.rows())
+	if _, marked := m.Marked(); len(marked) > 0 {
+		body[0] += theme.Gold().Render(fmt.Sprintf("  %d marked", len(marked)))
+	}
+	end := min(len(shown), m.runOffset+m.rows())
 	for i := m.runOffset; i < end; i++ {
-		r := st.runs[i]
+		r := shown[i]
 		meta := "  " + r.Name
 		if !r.CreatedAt.IsZero() {
 			meta = "  " + timefmt.Age(m.now().Sub(r.CreatedAt)) + " ago" + meta
 		}
-		first := " " + theme.Icon(r.Status, r.Conclusion) + " " + theme.Bold().Render(fmt.Sprintf("#%d", r.RunNumber)) +
+		mark := " "
+		if st.marked[r.ID] {
+			mark = theme.Gold().Render(">")
+		}
+		first := mark + theme.Icon(r.Status, r.Conclusion) + " " + theme.Bold().Render(fmt.Sprintf("#%d", r.RunNumber)) +
 			" " + theme.Accent().UnsetBold().Render(r.HeadBranch) + theme.Muted().Render(meta)
 		if r.RunAttempt > 1 {
 			first += theme.Muted().Render(fmt.Sprintf("  attempt %d", r.RunAttempt))
@@ -337,16 +424,51 @@ func (m Model) Mouse(ev mouse.Event) (Model, tea.Cmd) {
 	}
 	// Below the runs pane's status line, each run takes two rows.
 	row := ev.Y - 2
-	st := m.current()
+	shown := m.shown()
 	i := m.runOffset + row/2
-	if row < 0 || i >= min(len(st.runs), m.runOffset+m.rows()) {
+	if row < 0 || i >= min(len(shown), m.runOffset+m.rows()) {
 		return m, nil
 	}
 	m.focusRuns, m.runIdx = true, i
 	m.clamp()
 	if ev.Kind == mouse.DoubleClick {
-		open := OpenRunMsg{Repo: m.repos[m.repoIdx], Run: st.runs[i]}
+		open := OpenRunMsg{Repo: m.repos[m.repoIdx], Run: shown[i]}
 		return m, func() tea.Msg { return open }
 	}
 	return m, nil
+}
+
+// Marked returns the highlighted repo's marked runs, newest first.
+func (m Model) Marked() (string, []runs.Run) {
+	if len(m.repos) == 0 {
+		return "", nil
+	}
+	st := m.current()
+	var out []runs.Run
+	for _, r := range st.runs {
+		if st.marked[r.ID] {
+			out = append(out, r)
+		}
+	}
+	return m.repos[m.repoIdx], out
+}
+
+// ClearMarks unmarks every run.
+func (m Model) ClearMarks() Model {
+	for _, st := range m.state {
+		st.marked = nil
+	}
+	return m
+}
+
+// Remove drops runs from repo's list straight away, such as after deleting
+// them, rather than waiting for the next poll.
+func (m Model) Remove(repo string, ids []int64) Model {
+	st, ok := m.state[repo]
+	if !ok {
+		return m
+	}
+	st.runs = slices.DeleteFunc(slices.Clone(st.runs), func(r runs.Run) bool { return slices.Contains(ids, r.ID) })
+	m.clamp()
+	return m
 }
