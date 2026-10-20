@@ -4,9 +4,11 @@ on:
   push:
     branches:
       - dev
+  # PRs into main are only the promote PR, already tested by the push to dev,
+  # and the release PR. Both are opened by github-actions, so a trigger here
+  # waits for a manual approval.
   pull_request:
     branches:
-      - main
       - dev
 
 concurrency:
@@ -18,9 +20,6 @@ permissions:
 
 jobs:
   test:
-    # A push to dev already tests the promote PR, and a release PR only bumps
-    # versions and the changelog.
-    if: github.event_name == 'push' || (github.head_ref != 'dev' && !startsWith(github.head_ref, 'release-please--'))
     strategy:
       fail-fast: false
       matrix:
