@@ -14,6 +14,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/cli/go-gh/v2/pkg/api"
+	"github.com/cli/go-gh/v2/pkg/repository"
 
 	"github.com/EvilNick2/gh-argus/internal/actions"
 	"github.com/EvilNick2/gh-argus/internal/app"
@@ -50,6 +51,9 @@ func run() error {
 		return nil
 	})
 	showVersion := flag.Bool("version", false, "print the version and exit")
+	var pick bool
+	flag.BoolVar(&pick, "p", false, "open the repo picker instead of watching the current repo")
+	flag.BoolVar(&pick, "picker", false, "same as -p")
 	flag.Parse()
 	if *showVersion {
 		fmt.Println("gh argus", version.String())
@@ -232,12 +236,26 @@ func run() error {
 		}
 	}()
 
-	_, err = tea.NewProgram(app.New(deps, p, given)).Run()
+	_, err = tea.NewProgram(app.New(deps, p, startRepos(given, pick, repository.Current))).Run()
 	close(stopFlush)
 	if ferr := snaps.Flush(); err == nil {
 		err = ferr
 	}
 	return err
+}
+
+// startRepos picks the repos to watch on launch: those given with -R,
+// otherwise the current checkout's repo. Nil opens the picker, which -p asks
+// for and which is the fallback outside a checkout of a github.com repo.
+func startRepos(given []string, pick bool, current func() (repository.Repository, error)) []string {
+	if len(given) > 0 || pick {
+		return given
+	}
+	r, err := current()
+	if err != nil || r.Host != "github.com" {
+		return nil
+	}
+	return []string{r.Owner + "/" + r.Name}
 }
 
 // getBody adapts a Fetcher to repos.Getter.
