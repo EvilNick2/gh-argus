@@ -101,8 +101,15 @@ ARGUS_LIVE=1 go test -v -run Live ./...
 
 The live tests call the real API with your token and change nothing.
 
-Releases are built by `cli/gh-extension-precompile` when a `v*` tag is pushed.
-Tags containing a hyphen, such as `v0.1.0-rc.1`, publish as prereleases, and
+Work lands on `dev`, where CI runs. Each push to `dev` opens a PR to `main`,
+which should be merged with a merge commit so release-please sees every
+conventional commit. On `main`, release-please keeps a release PR open with
+the next version and changelog. Merging it tags the release, and
+`cli/gh-extension-precompile` builds and attaches the binaries. `main` is then
+merged back into `dev`.
+
+A `v*` tag pushed by hand is also built into a release. Tags containing a
+hyphen, such as `v0.1.0-rc.1`, publish as prereleases, and
 install with `gh extension install EvilNick2/gh-argus --pin <tag>`. That only
 works once a full release exists, since `gh extension install` first checks
 the latest release, which is never a prerelease, to decide whether the
