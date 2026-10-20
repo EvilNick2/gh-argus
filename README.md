@@ -18,16 +18,20 @@ gh extension install EvilNick2/gh-argus
 
 ```sh
 gh argus
+gh argus -p
 gh argus -R owner/repo -R owner/other
 ```
 
-With no `-R`, argus opens a picker listing every repo you own, collaborate
-on, or can see through an organisation you belong to, with the state of each
-one's latest run. `space` selects, `/` filters, `o` cycles through owners and
-`enter` starts watching. The picker remembers your last selection, and `p`
-brings it back at any time.
+Inside a checkout of a GitHub repo, `gh argus` watches that repo, using the
+same remote `gh` would. `-R` watches the repos given instead.
 
-`-R` skips the picker and watches the repos given. `gh argus -version`
+`-p` or `--picker` opens a picker listing every repo you own, collaborate
+on, or can see through an organisation you belong to, with the state of each
+one's latest run. It also opens outside a checkout. `space` selects, `/`
+filters, `o` cycles through owners and `enter` starts watching. The picker
+remembers your last selection, and `p` brings it back at any time.
+
+`gh argus -version`
 prints the version, which the header also shows. A build from a release tag
 shows the tag, and any other build shows "dev" and its commit.
 
