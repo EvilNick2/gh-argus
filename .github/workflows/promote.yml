@@ -1,0 +1,35 @@
+name: promote
+
+on:
+  push:
+    branches:
+      - dev
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  open-pr:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v7
+      - name: open a PR to main if none is open
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "$(gh api "repos/${GITHUB_REPOSITORY}/compare/main...dev" --jq .ahead_by)" = "0" ]
+          then
+            echo "dev has no commits ahead of main"
+            exit 0
+          fi
+          if [ "$(gh pr list --base main --head dev --state open --json number --jq length)" != "0" ]
+          then
+            echo "a PR is already open, it picks up new commits by itself"
+            exit 0
+          fi
+          gh pr create --base main --head dev \
+            --title "chore: promote dev to main" \
+            --body "Automated PR. Merge with a merge commit so each conventional commit reaches release-please."
